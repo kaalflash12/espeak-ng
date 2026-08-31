@@ -16,7 +16,8 @@ jobs:
           : > proxies.txt
           curl -fsSL --max-time 30 https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt >> proxies.txt || true
           curl -fsSL --max-time 30 https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt >> proxies.txt || true
-          sed -E 's#^https?://##; s#/.*$##' proxies.txt | grep -E '^[A-Za-z0-9.-]+:[0-9]+$' | awk '!seen[$0]++' | head -n 120 > proxies.clean
+          sed -E 's#^https?://##; s#/.*$##' proxies.txt | grep -E '^[A-Za-z0-9.-]+:[0-9]+$' | awk '!seen[$0]++' > proxies.all
+          head -n 120 proxies.all > proxies.clean
           echo "PROXY_POOL_COUNT=$(wc -l < proxies.clean)"
           test -s proxies.clean
       - name: Find TLS CONNECT egress that reaches official RDK
@@ -38,7 +39,7 @@ jobs:
           metas=(hits/*.meta)
           if [ ! -e "${metas[0]}" ]; then echo 'NO_VALID_CONNECT_PROXY'; exit 1; fi
           cat hits/*.meta
-          first=$(head -n1 hits/*.meta | head -n1)
+          first=$(cat hits/*.meta | head -n1)
           proxy=${first%%|*}; key=$(echo "$proxy"|tr ':.' '___')
           cp "hits/$key.bin" rdk.exe
           echo "VALID_CONNECT_PROXY_META=$first"
