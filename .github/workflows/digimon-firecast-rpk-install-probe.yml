@@ -1,0 +1,70 @@
+name: DIGIMON Firecast RPK Install Probe
+on:
+  push:
+    branches: [digimon-fetch-matrix-20260830]
+    paths: [.github/workflows/digimon-firecast-rpk-install-probe.yml]
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install Store Firecast and exact RPK input
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+          if($LASTEXITCODE-ne 0){throw "FIRECAST_INSTALL_EXIT=$LASTEXITCODE"}
+          py -m pip install --disable-pip-version-check --quiet gdown
+          $z=Join-Path $env:RUNNER_TEMP 'bundle.zip'
+          py -m gdown 'https://drive.google.com/uc?id=1LWaYGuvoVLQ-TP3Yj0nqVprosbmYe_1b' -O $z
+          if($LASTEXITCODE-ne 0){throw 'GDOWN_FAIL'}
+          $bsha=(Get-FileHash $z -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($bsha-ne'42094ab528b6f2139b0f2b09ef6741fb3a5640b5ba0f45041270c9e1f3d70bdb'){throw "BUNDLE_SHA=$bsha"}
+          $d=Join-Path $env:RUNNER_TEMP 'bundle';Expand-Archive $z $d -Force
+          $rpk=Join-Path $d 'DIGIMON_ERA_DA_DUALIDADE_FINAL.rpk'
+          $rsha=(Get-FileHash $rpk -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($rsha-ne'3a3a61e642054f7a98cc7eefb01f0d43c8acf7c703e262b8bb55e8b63682bfef'){throw "RPK_SHA=$rsha"}
+          "RPK=$rpk" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "FIRECAST=$(Join-Path $env:LOCALAPPDATA 'Firecast\Firecast.exe')" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "INPUT_PASS BUNDLE=$bsha RPK=$rsha"
+      - name: Open exact RPK and inspect installer UI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Add-Type -AssemblyName UIAutomationClient
+          Add-Type -AssemblyName UIAutomationTypes
+          Add-Type -AssemblyName System.Drawing
+          Add-Type -AssemblyName System.Windows.Forms
+          $out=Join-Path $env:RUNNER_TEMP 'rpk-probe';New-Item -ItemType Directory -Force $out|Out-Null
+          function Shot($n){try{$b=[Windows.Forms.Screen]::PrimaryScreen.Bounds;$bmp=New-Object Drawing.Bitmap $b.Width,$b.Height;$g=[Drawing.Graphics]::FromImage($bmp);$g.CopyFromScreen($b.Location,[Drawing.Point]::Empty,$b.Size);$bmp.Save((Join-Path $out $n));$g.Dispose();$bmp.Dispose()}catch{}}
+          function DumpUI($n){
+            $root=[Windows.Automation.AutomationElement]::RootElement
+            $all=$root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
+            $lines=@();foreach($e in $all){try{$nm=[string]$e.Current.Name;$ct=[string]$e.Current.ControlType.ProgrammaticName;if($nm){$lines += "$ct`t$nm"}}catch{}}
+            $lines|Set-Content (Join-Path $out $n)
+            $lines|Select-Object -First 300|ForEach-Object{Write-Host "UI=$_"}
+          }
+          $p=Start-Process $env:FIRECAST -ArgumentList @($env:RPK) -PassThru
+          Write-Host "FIRECAST_PID=$($p.Id)"
+          Start-Sleep 8;Shot 'after-open-8s.png';DumpUI 'ui-8s.txt'
+          # click only explicit install/yes/ok confirmations if present
+          $root=[Windows.Automation.AutomationElement]::RootElement
+          foreach($label in @('Instalar','Install','Sim','Yes','OK','Confirmar','Confirm')){
+            $cond=New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty,$label)
+            $els=$root.FindAll([Windows.Automation.TreeScope]::Descendants,$cond)
+            foreach($e in $els){try{$pat=$e.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern);$pat.Invoke();Write-Host "CLICKED=$label";Start-Sleep 2}catch{}}
+          }
+          Start-Sleep 10;Shot 'after-clicks.png';DumpUI 'ui-after-clicks.txt'
+          Write-Host '=== DIGIMON FILES IN APPDATA ==='
+          foreach($r in @($env:APPDATA,$env:LOCALAPPDATA)){
+            Get-ChildItem $r -Recurse -File -ErrorAction SilentlyContinue | Where-Object {$_.FullName -match 'DigiTerion|EraDaDualidade|DigiMon' -or $_.Name -match 'DigiTerion|EraDaDualidade'} | Select-Object -First 200 FullName,Length | Format-Table -AutoSize
+          }
+          Write-Host '=== FIRECAST PROCESSES ==='
+          Get-Process | Where-Object {$_.ProcessName -match 'Firecast|RRPG'} | Select Id,ProcessName,MainWindowTitle,Path | Format-Table -AutoSize
+          if(-not $p.HasExited){try{$p.CloseMainWindow()|Out-Null;Start-Sleep 3}catch{};if(-not$p.HasExited){Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digimon-rpk-install-probe
+          path: ${{ runner.temp }}/rpk-probe/*
+          if-no-files-found: warn
