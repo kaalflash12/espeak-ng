@@ -1,0 +1,90 @@
+name: DIGIMON Firecast Browser Fetch
+on:
+  push:
+    branches: [digimon-fetch-matrix-20260830]
+    paths: [.github/workflows/digimon-firecast-browser-fetch.yml]
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare browser
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --disable-pip-version-check selenium
+          google-chrome --version
+          chromedriver --version || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb
+      - name: Fetch through full Chrome session
+        shell: bash
+        run: |
+          cat > /tmp/fetch.py <<'PY'
+          import os,time,hashlib,sys
+          from pathlib import Path
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          from selenium.webdriver.common.by import By
+          out=Path(os.environ['RUNNER_TEMP'])/'firecast-browser-out'; out.mkdir(parents=True,exist_ok=True)
+          opt=Options()
+          opt.add_argument('--no-sandbox'); opt.add_argument('--disable-dev-shm-usage')
+          opt.add_argument('--window-size=1365,900')
+          opt.add_argument('--disable-blink-features=AutomationControlled')
+          opt.add_experimental_option('excludeSwitches',['enable-automation'])
+          opt.add_experimental_option('useAutomationExtension',False)
+          opt.add_experimental_option('prefs',{'download.default_directory':str(out),'download.prompt_for_download':False,'download.directory_upgrade':True,'safebrowsing.enabled':True})
+          d=webdriver.Chrome(options=opt)
+          d.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument',{'source':"Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"})
+          def wait_clear(url,limit=90):
+              d.get(url)
+              for i in range(limit):
+                  title=d.title or ''
+                  src=d.page_source or ''
+                  if i%5==0: print('WAIT',i,'TITLE',repr(title),'URL',d.current_url,'LEN',len(src),flush=True)
+                  if 'Just a moment' not in title and 'cf-chl' not in src and d.current_url.startswith('https://firecast.app'):
+                      return True
+                  time.sleep(1)
+              return False
+          try:
+              if not wait_clear('https://firecast.app/pt_br/para-programadores/',90):
+                  print('CF_NOT_CLEARED_HOME'); sys.exit(2)
+              print('HOME_CLEARED',d.title,d.current_url,d.get_cookies(),flush=True)
+              links=d.find_elements(By.TAG_NAME,'a')
+              sdk=None
+              for a in links:
+                  href=a.get_attribute('href') or ''
+                  txt=(a.text or '').strip()
+                  if 'RDK3.7' in href or 'SDK Installer' in txt:
+                      print('SDK_LINK',txt,href,flush=True); sdk=a; break
+              if sdk is None:
+                  print('NO_SDK_LINK'); sys.exit(3)
+              sdk.click()
+              deadline=time.time()+120
+              found=None
+              while time.time()<deadline:
+                  fs=[p for p in out.iterdir() if p.is_file() and not p.name.endswith('.crdownload')]
+                  if fs:
+                      found=max(fs,key=lambda p:p.stat().st_mtime)
+                      if found.stat().st_size>100000: break
+                  print('DOWNLOAD_WAIT',d.title,d.current_url,[p.name for p in out.iterdir()],flush=True)
+                  time.sleep(2)
+              if not found or found.stat().st_size<=100000:
+                  print('NO_VALID_DOWNLOAD',d.title,d.current_url,d.page_source[:1000]);sys.exit(4)
+              b=found.read_bytes(); sha=hashlib.sha256(b).hexdigest()
+              print('BROWSER_FETCH_FILE',found.name,'SIZE',len(b),'HEAD',b[:2],'SHA256',sha,flush=True)
+              if b[:2]!=b'MZ':sys.exit(5)
+              target=out/'rdk-verified.exe'
+              if found!=target: found.replace(target)
+          finally:
+              d.quit()
+          PY
+          xvfb-run -a python /tmp/fetch.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firecast-rdk-browser-verified
+          path: ${{ runner.temp }}/firecast-browser-out/rdk-verified.exe
+          if-no-files-found: error
