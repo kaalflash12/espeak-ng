@@ -1,0 +1,55 @@
+name: DIGIMON RDK Tor Probe
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+  workflow_dispatch:
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Install and start Tor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tor
+          sudo systemctl restart tor || sudo service tor restart
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 9050; then break; fi
+            sleep 1
+          done
+          nc -z 127.0.0.1 9050
+          echo 'TOR_READY'
+      - name: Fetch official RDK through Tor
+        shell: bash
+        run: |
+          set -u
+          urls=(
+            'https://firecast.app/downloads/RDK3.7.b.exe'
+            'https://firecast.app/downloads/RDK3.7b.exe'
+          )
+          ok=0
+          n=0
+          for u in "${urls[@]}"; do
+            n=$((n+1)); p="rdk-${n}.exe"
+            echo "=== $u ==="
+            code=$(curl --socks5-hostname 127.0.0.1:9050 -L -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152 Safari/537.36' --connect-timeout 30 --max-time 120 -sS -w '%{http_code}' -o "$p" "$u" || true)
+            size=$(stat -c%s "$p" 2>/dev/null || echo 0)
+            head=$(xxd -p -l 2 "$p" 2>/dev/null || true)
+            sha=$(sha256sum "$p" 2>/dev/null | awk '{print $1}')
+            echo "RESULT URL=$u HTTP=$code SIZE=$size HEADHEX=$head SHA256=$sha"
+            if [ "$code" = 200 ] && [ "$head" = 4d5a ] && [ "$size" -gt 100000 ]; then
+              cp "$p" rdk-verified.exe
+              echo "VALID_RDK_URL=$u"
+              echo "VALID_RDK_SHA=$sha"
+              ok=1
+              break
+            fi
+          done
+          if [ "$ok" -ne 1 ]; then exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rdk-verified
+          path: rdk-verified.exe
+          retention-days: 1
