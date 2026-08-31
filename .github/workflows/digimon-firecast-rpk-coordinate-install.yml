@@ -1,0 +1,104 @@
+name: DIGIMON Firecast RPK Coordinate Install
+on:
+  push:
+    branches: [digimon-fetch-matrix-20260830]
+    paths: [.github/workflows/digimon-firecast-rpk-coordinate-install.yml]
+jobs:
+  install:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install Firecast and fetch exact RPK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+          if($LASTEXITCODE-ne 0){throw "FIRECAST_INSTALL_EXIT=$LASTEXITCODE"}
+          py -m pip install --disable-pip-version-check --quiet gdown
+          $z=Join-Path $env:RUNNER_TEMP 'bundle.zip'
+          py -m gdown 'https://drive.google.com/uc?id=1LWaYGuvoVLQ-TP3Yj0nqVprosbmYe_1b' -O $z
+          if($LASTEXITCODE-ne 0){throw 'GDOWN_FAIL'}
+          $bsha=(Get-FileHash $z -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($bsha-ne'42094ab528b6f2139b0f2b09ef6741fb3a5640b5ba0f45041270c9e1f3d70bdb'){throw "BUNDLE_SHA=$bsha"}
+          $d=Join-Path $env:RUNNER_TEMP 'bundle';Expand-Archive $z $d -Force
+          $rpk=Join-Path $d 'DIGIMON_ERA_DA_DUALIDADE_FINAL.rpk'
+          $rsha=(Get-FileHash $rpk -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($rsha-ne'3a3a61e642054f7a98cc7eefb01f0d43c8acf7c703e262b8bb55e8b63682bfef'){throw "RPK_SHA=$rsha"}
+          "RPK=$rpk" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "FIRECAST=$(Join-Path $env:LOCALAPPDATA 'Firecast\Firecast.exe')" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "INPUT_PASS BUNDLE=$bsha RPK=$rsha"
+      - name: Click custom Yes and prove installation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Add-Type -AssemblyName UIAutomationClient
+          Add-Type -AssemblyName UIAutomationTypes
+          Add-Type -AssemblyName System.Drawing
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class MouseGate17 {
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+            [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+            public const uint LEFTDOWN=0x0002; public const uint LEFTUP=0x0004;
+            public static void Click(int x,int y){SetCursorPos(x,y);System.Threading.Thread.Sleep(150);mouse_event(LEFTDOWN,0,0,0,UIntPtr.Zero);System.Threading.Thread.Sleep(100);mouse_event(LEFTUP,0,0,0,UIntPtr.Zero);}
+          }
+          '@
+          $out=Join-Path $env:RUNNER_TEMP 'rpk-coordinate-install';New-Item -ItemType Directory -Force $out|Out-Null
+          function Shot($n){$b=[Windows.Forms.Screen]::PrimaryScreen.Bounds;$bmp=New-Object Drawing.Bitmap $b.Width,$b.Height;$g=[Drawing.Graphics]::FromImage($bmp);$g.CopyFromScreen($b.Location,[Drawing.Point]::Empty,$b.Size);$bmp.Save((Join-Path $out $n));$g.Dispose();$bmp.Dispose()}
+          function FirecastWindow {
+            $root=[Windows.Automation.AutomationElement]::RootElement
+            $wins=$root.FindAll([Windows.Automation.TreeScope]::Children,[Windows.Automation.Condition]::TrueCondition)
+            foreach($w in $wins){try{if(([string]$w.Current.Name) -match '^Firecast'){return $w}}catch{}}
+            return $null
+          }
+          $start=Get-Date
+          $p=Start-Process $env:FIRECAST -ArgumentList @($env:RPK) -PassThru
+          Write-Host "FIRECAST_PID=$($p.Id)"
+          $w=$null
+          for($i=0;$i-lt 30 -and $null-eq$w;$i++){Start-Sleep 1;$w=FirecastWindow}
+          if($null-eq$w){throw 'FIRECAST_WINDOW_NOT_FOUND'}
+          Start-Sleep 4;Shot 'before-click.png'
+          $r=$w.Current.BoundingRectangle
+          Write-Host "WINDOW_RECT=$($r.Left),$($r.Top),$($r.Width),$($r.Height) TITLE=$($w.Current.Name)"
+          # Visual calibration from the actual Firecast custom modal: Yes center ~= 48.9% width, 62.6% height.
+          $x=[int][Math]::Round($r.Left + $r.Width*0.489)
+          $y=[int][Math]::Round($r.Top + $r.Height*0.626)
+          Write-Host "CLICK_YES_AT=$x,$y"
+          [MouseGate17]::Click($x,$y)
+          Start-Sleep 5;Shot 'after-click-5s.png'
+          # A successful click closes the install modal. Sample center pixel around the old button is no longer modal white.
+          Write-Host '=== RECENT FIRECAST/PLUGIN FILES ==='
+          $roots=@(
+            (Join-Path $env:APPDATA 'RRPG'),
+            (Join-Path $env:APPDATA 'Firecast'),
+            (Join-Path $env:LOCALAPPDATA 'RRPG'),
+            (Join-Path $env:LOCALAPPDATA 'Firecast')
+          )
+          foreach($root in $roots){
+            Write-Host "ROOT=$root EXISTS=$(Test-Path $root)"
+            if(Test-Path $root){
+              Get-ChildItem $root -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object {$_.LastWriteTime -ge $start.AddSeconds(-2)} |
+                Sort-Object LastWriteTime -Descending |
+                Select-Object -First 300 FullName,Length,LastWriteTime | Format-Table -AutoSize
+            }
+          }
+          Write-Host '=== DIGIMON SEARCH ==='
+          foreach($root in @($env:APPDATA,$env:LOCALAPPDATA)){
+            Get-ChildItem $root -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object {$_.FullName -match 'DigiTerion|EraDaDualidade|DIGIMON_ERA|DigiMon' -or $_.Name -match 'DigiTerion|EraDaDualidade|DIGIMON_ERA'} |
+              Select-Object -First 300 FullName,Length,LastWriteTime | Format-Table -AutoSize
+          }
+          # detect whether modal still visible via screenshot dimensions/UI title; process must stay alive.
+          if($p.HasExited){throw "FIRECAST_EXITED=$($p.ExitCode)"}
+          Write-Host 'RPK_CUSTOM_YES_CLICK_EXECUTED=1'
+          try{$p.CloseMainWindow()|Out-Null;Start-Sleep 3}catch{}
+          if(-not$p.HasExited){Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digimon-rpk-coordinate-install
+          path: ${{ runner.temp }}/rpk-coordinate-install/*
+          if-no-files-found: warn
