@@ -1,0 +1,94 @@
+name: DIGIMON Firecast RPK Install Probe
+
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+    paths: [.github/workflows/digimon-firecast-rpk-install-probe.yml]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install Firecast and exact final RPK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+          if($LASTEXITCODE-ne0){throw "Firecast Store install failed $LASTEXITCODE"}
+          $firecast=Join-Path $env:LOCALAPPDATA 'Firecast\Firecast.exe'
+          if(-not(Test-Path $firecast)){throw 'Firecast.exe missing'}
+
+          python -m pip install --disable-pip-version-check --quiet gdown
+          $bundle=Join-Path $env:RUNNER_TEMP 'bundle.zip'
+          python -m gdown 'https://drive.google.com/uc?id=1LWaYGuvoVLQ-TP3Yj0nqVprosbmYe_1b' -O $bundle
+          $bundleSha=(Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($bundleSha-ne '42094ab528b6f2139b0f2b09ef6741fb3a5640b5ba0f45041270c9e1f3d70bdb'){throw "Bundle SHA mismatch $bundleSha"}
+          $runtime=Join-Path $env:RUNNER_TEMP 'bundle'
+          Expand-Archive $bundle $runtime -Force
+          $rpk=Join-Path $runtime 'DIGIMON_ERA_DA_DUALIDADE_FINAL.rpk'
+          $rpkSha=(Get-FileHash $rpk -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($rpkSha-ne '3a3a61e642054f7a98cc7eefb01f0d43c8acf7c703e262b8bb55e8b63682bfef'){throw "RPK SHA mismatch $rpkSha"}
+          Write-Host "FINAL_RPK_SHA256=$rpkSha"
+
+          Add-Type -AssemblyName UIAutomationClient
+          Add-Type -AssemblyName UIAutomationTypes
+          function Dump-UI([string]$tag){
+            Write-Host "=== UI $tag ==="
+            $root=[Windows.Automation.AutomationElement]::RootElement
+            $wins=$root.FindAll([Windows.Automation.TreeScope]::Children,[Windows.Automation.Condition]::TrueCondition)
+            foreach($w in $wins){
+              try {
+                $wn=[string]$w.Current.Name; $cls=[string]$w.Current.ClassName
+                if($wn -ne ''){Write-Host "WINDOW=$wn CLASS=$cls"}
+                if($wn -match 'Firecast|Plugin|Instal|Install|DIGIMON|RRPG'){
+                  $all=$w.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
+                  foreach($e in $all){
+                    try { $n=[string]$e.Current.Name; $ct=[string]$e.Current.ControlType.ProgrammaticName; if($n-ne''){Write-Host "CONTROL=$ct NAME=$n"} } catch {}
+                  }
+                }
+              } catch {}
+            }
+          }
+          function Invoke-InstallConfirm {
+            $root=[Windows.Automation.AutomationElement]::RootElement
+            $all=$root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
+            foreach($e in $all){
+              try {
+                $n=[string]$e.Current.Name
+                $ct=[string]$e.Current.ControlType.ProgrammaticName
+                if($ct -eq 'ControlType.Button' -and $n -match '^(Instalar|Install|Sim|Yes|OK|Confirmar|Confirm)$'){
+                  $pat=$e.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
+                  if($pat){Write-Host "INVOKE_BUTTON=$n"; $pat.Invoke(); return $true}
+                }
+              } catch {}
+            }
+            return $false
+          }
+
+          $before=Get-Date
+          $p=Start-Process -FilePath $firecast -ArgumentList ('"'+$rpk+'"') -PassThru
+          Write-Host "FIRECAST_PID=$($p.Id)"
+          for($i=0;$i-lt18;$i++){
+            Start-Sleep 2
+            Dump-UI "T$i"
+            [void](Invoke-InstallConfirm)
+          }
+
+          Write-Host '=== RECENT FILES ==='
+          $roots=@((Join-Path $env:LOCALAPPDATA 'Firecast'),(Join-Path $env:APPDATA 'Firecast'),$env:APPDATA,$env:LOCALAPPDATA) | Where-Object {$_ -and (Test-Path $_)} | Select-Object -Unique
+          $hits=@()
+          foreach($root in $roots){
+            Get-ChildItem $root -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object {$_.LastWriteTime -ge $before.AddMinutes(-1) -and ($_.Name -match 'Digi|Terion|plugin|rpk|module|init' -or $_.DirectoryName -match 'Digi|Terion|Plugin|plugin')} |
+              ForEach-Object { Write-Host ("RECENT="+$_.FullName+" SIZE="+$_.Length); $hits += $_.FullName }
+          }
+          Write-Host "RECENT_HIT_COUNT=$($hits.Count)"
+
+          Write-Host '=== FIRECAST TREE DIRS ==='
+          Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Firecast') -Directory -Recurse -ErrorAction SilentlyContinue | ForEach-Object {Write-Host ("DIR="+$_.FullName)}
+
+          if(-not $p.HasExited){$p.CloseMainWindow()|Out-Null; Start-Sleep 3; if(-not $p.HasExited){Stop-Process -Id $p.Id -Force}}
+          if($hits.Count-eq0){throw 'RPK_INSTALL_NOT_MATERIALIZED'}
+          Write-Host 'DIRECT_RPK_INSTALL_PROBE=PASS'
