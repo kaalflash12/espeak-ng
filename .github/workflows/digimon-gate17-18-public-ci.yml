@@ -14,26 +14,56 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download exact final source
+      - name: Download hash-locked final RPK bundle
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           python -m pip install --disable-pip-version-check --quiet gdown
-          $dst=Join-Path $PWD 'ci\digimon-gate17\final-source.zip'
-          python -m gdown 'https://drive.google.com/uc?id=1LWaYGuvoVLQ-TP3Yj0nqVprosbmYe_1b' -O $dst
-          $sha=(Get-FileHash $dst -Algorithm SHA256).Hash.ToLowerInvariant()
-          if($sha-ne '0dde069bbe7a53e88d027f31d4ebfc4d25fee7f1f51b91fdd8e66199d2f65624'){throw "Source SHA mismatch: $sha"}
-          Write-Host "SOURCE_DOWNLOAD_SHA256=$sha"
+          $bundle=Join-Path $env:RUNNER_TEMP 'DIGIMON_GATE17_18_FINAL_BUNDLE.zip'
+          python -m gdown 'https://drive.google.com/uc?id=1LWaYGuvoVLQ-TP3Yj0nqVprosbmYe_1b' -O $bundle
+          $bundleSha=(Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($bundleSha-ne '42094ab528b6f2139b0f2b09ef6741fb3a5640b5ba0f45041270c9e1f3d70bdb'){throw "Bundle SHA mismatch: $bundleSha"}
+          Write-Host "FINAL_BUNDLE_SHA256=$bundleSha"
 
-      - name: Execute Gates 14-15 control and Gates 17-18
+          $runtime=Join-Path $PWD 'ci\digimon-gate17\runtime'
+          if(Test-Path $runtime){Remove-Item $runtime -Recurse -Force}
+          Expand-Archive $bundle $runtime -Force
+
+          $rpk=Join-Path $runtime 'DIGIMON_ERA_DA_DUALIDADE_FINAL.rpk'
+          $script=Join-Path $runtime 'run_gate17.ps1'
+          if(-not(Test-Path $rpk)){throw 'Final RPK missing from bundle'}
+          if(-not(Test-Path $script)){throw 'Gate17 script missing from bundle'}
+
+          $rpkSha=(Get-FileHash $rpk -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($rpkSha-ne '3a3a61e642054f7a98cc7eefb01f0d43c8acf7c703e262b8bb55e8b63682bfef'){throw "Final RPK SHA mismatch: $rpkSha"}
+          $scriptSha=(Get-FileHash $script -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($scriptSha-ne 'bbbf465afc729bdbab6efc41fdacc1759cc4248e64dc545f79d128f2a8684383'){throw "Gate17 script SHA mismatch: $scriptSha"}
+          Write-Host "FINAL_RPK_SHA256=$rpkSha"
+          Write-Host "GATE17_SCRIPT_SHA256=$scriptSha"
+
+          # Fix only the harness record key: mutate the canonical seeded Fragmento record,
+          # not the duplicate item document that would create a 19th fragment state row.
+          $raw=Get-Content $script -Raw
+          $old='local FRAG="06_ITENS/Fragmento/Fragmento_de_Agumon.md"'
+          $new='local FRAG="06_ITENS/FRAGMENTOS_DETALHADOS/Fragmento_de_Agumon.md"'
+          if(-not $raw.Contains($old)){throw 'Expected fragment harness line not found'}
+          $raw=$raw.Replace($old,$new)
+          Set-Content $script -Value $raw -Encoding UTF8
+          Write-Host 'GATE17_FRAGMENT_RECORD_KEY_FIX=APPLIED'
+
+      - name: Execute Gate 17 persistence and Gate 18 final runtime
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          & .\ci\digimon-gate17\run_gate17.ps1
+          & .\ci\digimon-gate17\runtime\run_gate17.ps1
 
       - name: Print final evidence
         if: always()
         shell: pwsh
         run: |
-          $ev='.\ci\digimon-gate17\gate17-output\evidence.txt'
+          $ev='.\ci\digimon-gate17\runtime\gate17-output\final-evidence.txt'
           if(Test-Path $ev){Get-Content $ev}else{Write-Host 'EVIDENCE_FILE_MISSING'}
+          $p1='.\ci\digimon-gate17\runtime\gate17-output\gate17-phase1-marker.txt'
+          $p2='.\ci\digimon-gate17\runtime\gate17-output\gate17-phase2-marker.txt'
+          if(Test-Path $p1){Write-Host ('PHASE1_FILE='+(Get-Content $p1 -Raw).Trim())}
+          if(Test-Path $p2){Write-Host ('PHASE2_FILE='+(Get-Content $p2 -Raw).Trim())}
