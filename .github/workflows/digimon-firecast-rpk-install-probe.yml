@@ -11,7 +11,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - name: Initialize Firecast and require exact DigiTerion RPK install
+      - name: Require DigiTerion canary execution from Firecast plugin folder
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -27,71 +27,80 @@ jobs:
           if($bundleSha-ne '42094ab528b6f2139b0f2b09ef6741fb3a5640b5ba0f45041270c9e1f3d70bdb'){throw "Bundle SHA mismatch $bundleSha"}
           $runtime=Join-Path $env:RUNNER_TEMP 'bundle'
           Expand-Archive $bundle $runtime -Force
-          $rpk=Join-Path $runtime 'DIGIMON_ERA_DA_DUALIDADE_FINAL.rpk'
-          $rpkSha=(Get-FileHash $rpk -Algorithm SHA256).Hash.ToLowerInvariant()
+          $finalRpk=Join-Path $runtime 'DIGIMON_ERA_DA_DUALIDADE_FINAL.rpk'
+          $rpkSha=(Get-FileHash $finalRpk -Algorithm SHA256).Hash.ToLowerInvariant()
           if($rpkSha-ne '3a3a61e642054f7a98cc7eefb01f0d43c8acf7c703e262b8bb55e8b63682bfef'){throw "RPK SHA mismatch $rpkSha"}
           Write-Host "FINAL_RPK_SHA256=$rpkSha"
 
+          # Initialize profile/default plugins, then close cleanly.
+          $p=Start-Process -FilePath $firecast -PassThru
+          Start-Sleep 12
+          if(-not $p.HasExited){$p.CloseMainWindow()|Out-Null; try{Wait-Process -Id $p.Id -Timeout 8 -ErrorAction Stop}catch{Stop-Process -Id $p.Id -Force}}
+
+          $plugins=Join-Path $env:APPDATA 'Firecast\Plugins'
+          New-Item -ItemType Directory -Force $plugins|Out-Null
+          $canary=Join-Path $env:RUNNER_TEMP 'DigiTerionMon.EraDaDualidade.canary.rpk'
+          $py=Join-Path $env:RUNNER_TEMP 'make-canary.py'
+          $pyCode = @(
+            'import sys,zipfile',
+            'src,dst=sys.argv[1],sys.argv[2]',
+            'marker="DIGITERION_DIRECT_PLUGIN_LOAD_CANARY"',
+            'with zipfile.ZipFile(src,"r") as zin, zipfile.ZipFile(dst,"w") as zout:',
+            '    for info in zin.infolist():',
+            '        data=zin.read(info.filename)',
+            '        if info.filename=="init.lua":',
+            '            data=("showMessage(\\\""+marker+"\\\")\\n").encode("utf-8")',
+            '        zout.writestr(info,data)',
+            'print(marker)'
+          ) -join "`n"
+          Set-Content -LiteralPath $py -Value $pyCode -Encoding UTF8
+          & python $py $finalRpk $canary
+          if($LASTEXITCODE-ne0 -or -not(Test-Path $canary)){throw 'CANARY_RPK_BUILD_FAILED'}
+          Write-Host ('CANARY_RPK_SHA256='+(Get-FileHash $canary -Algorithm SHA256).Hash.ToLowerInvariant())
+          $dest=Join-Path $plugins 'DigiTerionMon.EraDaDualidade.rpk'
+          Copy-Item $canary $dest -Force
+          Write-Host "CANARY_PLUGIN_PATH=$dest"
+
           Add-Type -AssemblyName UIAutomationClient
           Add-Type -AssemblyName UIAutomationTypes
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          function Close-FirecastGracefully($p){
-            if($null-eq$p -or $p.HasExited){return}
-            try{$p.CloseMainWindow()|Out-Null}catch{}
-            try{Wait-Process -Id $p.Id -Timeout 8 -ErrorAction Stop}catch{Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}
-          }
-          function Invoke-ConfirmButtons {
-            $root=[Windows.Automation.AutomationElement]::RootElement
-            $all=$root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
-            foreach($e in $all){
-              try{
-                $n=[string]$e.Current.Name; $ct=[string]$e.Current.ControlType.ProgrammaticName
-                if($ct-eq'ControlType.Button' -and $n-match '^(Instalar|Install|Sim|Yes|OK|Confirmar|Confirm|Continuar|Continue)$'){
-                  $pat=$e.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
-                  if($pat){Write-Host "INVOKE_BUTTON=$n"; $pat.Invoke()}
-                }
-              }catch{}
-            }
-          }
-          function Get-RpkModuleId([string]$path){
-            $zip=[IO.Compression.ZipFile]::OpenRead($path)
-            try{
-              $entry=$zip.Entries|Where-Object{$_.FullName-eq'module.xml'}|Select-Object -First 1
-              if($null-eq$entry){return ''}
-              $sr=[IO.StreamReader]::new($entry.Open())
-              try{$raw=$sr.ReadToEnd()}finally{$sr.Dispose()}
-              $m=[regex]::Match($raw,'<id>\s*([^<]+?)\s*</id>','IgnoreCase')
-              if($m.Success){return $m.Groups[1].Value.Trim()}
-              return ''
-            }finally{$zip.Dispose()}
-          }
-          function List-PluginIds([string]$tag){
-            $plugins=Join-Path $env:APPDATA 'Firecast\Plugins'
-            Write-Host "=== PLUGIN IDS $tag ==="
-            $ids=@()
-            if(-not(Test-Path $plugins)){Write-Host 'PLUGIN_DIR_MISSING'; return $ids}
-            foreach($f in Get-ChildItem $plugins -File -Filter '*.rpk'){
-              try{$mid=Get-RpkModuleId $f.FullName}catch{$mid=''; Write-Host "PLUGIN_READ_FAIL=$($f.FullName) ERROR=$($_.Exception.Message)"}
-              Write-Host "PLUGIN_FILE=$($f.FullName) MODULE_ID=$mid SIZE=$($f.Length)"
-              if($mid-ne''){$ids+=$mid}
-            }
-            return $ids
-          }
-
+          $marker='DIGITERION_DIRECT_PLUGIN_LOAD_CANARY'
+          $seen=$false
+          $started=Get-Date
           $p=Start-Process -FilePath $firecast -PassThru
-          Start-Sleep 10
-          Invoke-ConfirmButtons
-          Start-Sleep 2
-          Close-FirecastGracefully $p
-          $beforeIds=@(List-PluginIds 'BEFORE')
-          if($beforeIds -contains 'DigiTerionMon.EraDaDualidade'){throw 'DigiTerion unexpectedly present before install'}
+          Write-Host "FIRECAST_CANARY_PID=$($p.Id)"
+          for($i=0;$i-lt60 -and -not $seen;$i++){
+            Start-Sleep 1
+            $root=[Windows.Automation.AutomationElement]::RootElement
+            try{
+              $all=$root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
+              foreach($e in $all){
+                try{
+                  $n=[string]$e.Current.Name
+                  if($n -like "*$marker*"){
+                    Write-Host "CANARY_UI_ELEMENT=$n"
+                    $seen=$true
+                    break
+                  }
+                }catch{}
+              }
+            }catch{}
+          }
+          Write-Host "CANARY_EXECUTED=$seen"
 
-          $p=Start-Process -FilePath $firecast -ArgumentList ('"'+$rpk+'"') -PassThru
-          Write-Host "RPK_INSTALL_PROCESS_PID=$($p.Id)"
-          for($i=0;$i-lt20;$i++){Start-Sleep 2; Invoke-ConfirmButtons}
-          $afterIds=@(List-PluginIds 'AFTER')
-          $installed=$afterIds -contains 'DigiTerionMon.EraDaDualidade'
-          Write-Host "DIGITERION_MODULE_PRESENT=$installed"
-          Close-FirecastGracefully $p
-          if(-not $installed){throw 'EXACT_DIGITERION_RPK_NOT_INSTALLED'}
-          Write-Host 'DIRECT_EXACT_RPK_INSTALL=PASS'
+          Write-Host '=== RECENT FIRECAST LOGS ==='
+          foreach($rootPath in @((Join-Path $env:LOCALAPPDATA 'Firecast'),(Join-Path $env:APPDATA 'Firecast'))){
+            if(Test-Path $rootPath){
+              Get-ChildItem $rootPath -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object {$_.LastWriteTime -ge $started.AddMinutes(-1) -and $_.Length -lt 1048576} |
+                ForEach-Object {
+                  Write-Host "RECENT_FILE=$($_.FullName) SIZE=$($_.Length)"
+                  if($_.Extension -match '^\.(txt|log|lua|xml)$'){
+                    try{Get-Content $_.FullName -ErrorAction Stop | Select-Object -Last 120 | ForEach-Object{Write-Host "LOG=$_"}}catch{}
+                  }
+                }
+            }
+          }
+
+          if(-not $p.HasExited){$p.CloseMainWindow()|Out-Null; try{Wait-Process -Id $p.Id -Timeout 8 -ErrorAction Stop}catch{Stop-Process -Id $p.Id -Force}}
+          if(-not $seen){throw 'DIRECT_PLUGIN_FOLDER_CANARY_NOT_EXECUTED'}
+          Write-Host 'DIRECT_PLUGIN_FOLDER_CANARY=PASS'
