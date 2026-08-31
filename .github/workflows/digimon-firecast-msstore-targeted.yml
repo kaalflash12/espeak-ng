@@ -1,0 +1,41 @@
+name: DIGIMON Firecast Store Targeted Probe
+on:
+  push:
+    branches: [digimon-fetch-matrix-20260830]
+    paths: [.github/workflows/digimon-firecast-msstore-targeted.yml]
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - name: Install Store Firecast
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+          if($LASTEXITCODE-ne 0){throw "INSTALL_EXIT=$LASTEXITCODE"}
+      - name: Inspect installed package and associations
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          Write-Host '=== APPX CURRENT USER ==='
+          $pkgs=@(Get-AppxPackage | Where-Object {$_.Name -match 'Firecast|RRPG' -or $_.PackageFullName -match 'Firecast|RRPG'})
+          $pkgs | Format-List Name,PackageFullName,InstallLocation,PackageFamilyName,Version,Publisher
+          Write-Host "PKG_COUNT=$($pkgs.Count)"
+          foreach($p in $pkgs){
+            Write-Host "=== PACKAGE FILES $($p.InstallLocation) ==="
+            Get-ChildItem $p.InstallLocation -Recurse -File -ErrorAction SilentlyContinue | Where-Object {$_.Extension -in '.exe','.dll' -or $_.Name -match 'rdk|RRPG|Firecast'} | Select-Object FullName,Length | Format-Table -AutoSize
+            $manifest=Join-Path $p.InstallLocation 'AppxManifest.xml'
+            if(Test-Path $manifest){Write-Host '=== MANIFEST ===';Get-Content $manifest -Raw}
+          }
+          Write-Host '=== START APPS ==='
+          Get-StartApps | Where-Object {$_.Name -match 'Firecast|RRPG'} | Format-Table -AutoSize
+          Write-Host '=== RPK ASSOCIATION HKCU ==='
+          cmd /c assoc .rpk
+          cmd /c ftype | findstr /i "rpk firecast rrpg"
+          Write-Host '=== HKCU CLASSES RPK ==='
+          Get-ChildItem Registry::HKEY_CURRENT_USER\Software\Classes -ErrorAction SilentlyContinue | Where-Object {$_.PSChildName -match 'rpk|firecast|rrpg'} | ForEach-Object {Write-Host $_.Name; Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue | Format-List *}
+          Write-Host '=== SDK DIRECT ==='
+          $sdk=Join-Path $env:LOCALAPPDATA 'FirecastSDK3'
+          Write-Host "SDK_DIR=$sdk EXISTS=$(Test-Path $sdk)"
+          if(Test-Path $sdk){Get-ChildItem $sdk -Recurse -File | Select FullName,Length | Format-Table -AutoSize}
