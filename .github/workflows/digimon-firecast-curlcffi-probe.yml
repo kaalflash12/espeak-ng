@@ -1,0 +1,55 @@
+name: DIGIMON Firecast curl_cffi Probe
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install curl_cffi
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check curl_cffi
+      - name: Fetch official Firecast installers with Chrome TLS fingerprint
+        shell: pwsh
+        run: |
+          $py = @'
+          from curl_cffi import requests
+          from pathlib import Path
+          import hashlib, sys
+          s=requests.Session(impersonate='chrome')
+          headers={
+            'accept-language':'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+            'referer':'https://firecast.app/pt_br/para-programadores/'
+          }
+          for u in ['https://firecast.app/pt_br/para-programadores/','https://firecast.app/pt_br/download/']:
+              r=s.get(u,headers=headers,timeout=60,allow_redirects=True)
+              print('PAGE',u,r.status_code,r.url,len(r.content),r.headers.get('server'),r.headers.get('cf-ray'))
+              print('COOKIES',dict(s.cookies))
+          targets=[
+            ('rdk','https://firecast.app/downloads/RDK3.7.b.exe'),
+            ('firecast','https://firecast.app/downloads/firecast8_13_win64.exe')
+          ]
+          ok=0
+          for name,u in targets:
+              r=s.get(u,headers=headers,timeout=120,allow_redirects=True)
+              p=Path(name+'.exe')
+              p.write_bytes(r.content)
+              sha=hashlib.sha256(r.content).hexdigest()
+              print('FETCH',name,'STATUS',r.status_code,'URL',r.url,'SIZE',len(r.content),'HEAD',r.content[:2], 'SHA256',sha,'CTYPE',r.headers.get('content-type'),'CF',r.headers.get('cf-ray'))
+              if r.status_code==200 and r.content[:2]==b'MZ' and len(r.content)>100000:
+                  ok+=1
+          if ok != 2:
+              sys.exit('OFFICIAL_DOWNLOADS_NOT_VALID_PE')
+          '@
+          Set-Content -Path fetch.py -Value $py -Encoding UTF8
+          python fetch.py
+          foreach($f in 'rdk.exe','firecast.exe'){
+            $vi=[Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $f))
+            $sig=Get-AuthenticodeSignature $f
+            Write-Host "FILE=$f VERSION=$($vi.FileVersion) PRODUCT=$($vi.ProductName) PRODUCT_VERSION=$($vi.ProductVersion) COMPANY=$($vi.CompanyName) SIGNATURE=$($sig.Status) SIGNER=$($sig.SignerCertificate.Subject) SHA256=$((Get-FileHash $f -Algorithm SHA256).Hash.ToLowerInvariant()) SIZE=$((Get-Item $f).Length)"
+          }
