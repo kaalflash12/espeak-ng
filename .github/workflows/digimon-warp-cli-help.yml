@@ -1,0 +1,29 @@
+name: DIGIMON WARP CLI Help
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+    paths: [.github/workflows/digimon-warp-cli-help.yml]
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Install WARP client and print proxy CLI help
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ noble main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cloudflare-warp
+          sudo systemctl enable --now warp-svc
+          warp-cli --version || true
+          echo '=== TOP HELP ==='
+          warp-cli --accept-tos --help || true
+          echo '=== MODE HELP ==='
+          warp-cli --accept-tos mode --help || true
+          echo '=== PROXY HELP ==='
+          warp-cli --accept-tos proxy --help || true
+          echo '=== SETTINGS BEFORE ==='
+          warp-cli --accept-tos settings || true
