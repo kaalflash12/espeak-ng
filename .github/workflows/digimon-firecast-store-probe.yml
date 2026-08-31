@@ -9,42 +9,66 @@ on:
 jobs:
   probe:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 8
     steps:
-      - name: Install Firecast from Microsoft Store ID
+      - name: Install Firecast from Microsoft Store ID with bounded commands
         shell: pwsh
         run: |
           $ErrorActionPreference='Continue'
+          function Invoke-WingetBounded([string[]]$Args,[int]$TimeoutSec,[string]$Tag){
+            $out=Join-Path $env:RUNNER_TEMP ($Tag+'.out.txt')
+            $err=Join-Path $env:RUNNER_TEMP ($Tag+'.err.txt')
+            Remove-Item $out,$err -Force -ErrorAction SilentlyContinue
+            $p=Start-Process -FilePath 'winget.exe' -ArgumentList $Args -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+            try {
+              Wait-Process -Id $p.Id -Timeout $TimeoutSec -ErrorAction Stop
+              $p.Refresh(); $code=$p.ExitCode
+            } catch {
+              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              $code=124
+            }
+            Write-Host "=== $Tag STDOUT ==="
+            if(Test-Path $out){Get-Content $out}
+            Write-Host "=== $Tag STDERR ==="
+            if(Test-Path $err){Get-Content $err}
+            Write-Host "$($Tag.ToUpperInvariant())_EXIT=$code"
+            return $code
+          }
+
           Write-Host '=== WINGET VERSION/SOURCES ==='
           winget --version
           winget source list
-          Write-Host '=== STORE SHOW ==='
-          winget show --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements
-          $showExit=$LASTEXITCODE
-          Write-Host "STORE_SHOW_EXIT=$showExit"
-          Write-Host '=== STORE INSTALL ==='
-          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
-          $installExit=$LASTEXITCODE
-          Write-Host "STORE_INSTALL_EXIT=$installExit"
+
+          $showArgs=@('show','--id','XP9B1DQSFR12KZ','--source','msstore','--accept-source-agreements','--disable-interactivity')
+          $showExit=Invoke-WingetBounded $showArgs 60 'store_show'
+
+          $installArgs=@('install','--id','XP9B1DQSFR12KZ','--source','msstore','--accept-source-agreements','--accept-package-agreements','--silent','--disable-interactivity')
+          $installExit=Invoke-WingetBounded $installArgs 150 'store_install'
+
+          Write-Host '=== WINGET LIST EXACT ID ==='
+          winget list --id XP9B1DQSFR12KZ --accept-source-agreements --disable-interactivity
+          $listExit=$LASTEXITCODE
+          Write-Host "STORE_LIST_EXIT=$listExit"
+
           Write-Host '=== APPX PACKAGES ==='
-          Get-AppxPackage | Where-Object {$_.Name -match 'Firecast|RRPG' -or $_.PackageFullName -match 'Firecast|RRPG'} | Format-List Name,PackageFullName,PackageFamilyName,InstallLocation,Version,Status
+          $appx=Get-AppxPackage | Where-Object {$_.Name -match 'Firecast|RRPG' -or $_.PackageFullName -match 'Firecast|RRPG'}
+          $appx | Format-List Name,PackageFullName,PackageFamilyName,InstallLocation,Version,Status
+
           Write-Host '=== START APPS ==='
-          Get-StartApps | Where-Object {$_.Name -match 'Firecast|RRPG'} | Format-List *
-          Write-Host '=== EXECUTABLE DISCOVERY ==='
-          $roots=@($env:LOCALAPPDATA,$env:ProgramFiles,${env:ProgramFiles(x86)}) | Where-Object {$_ -and (Test-Path $_)}
-          $found=@()
-          foreach($root in $roots){
-            Get-ChildItem $root -Filter '*.exe' -File -Recurse -ErrorAction SilentlyContinue |
-              Where-Object {$_.Name -match 'Firecast|RRPGFichas|RRPG'} |
-              ForEach-Object {
-                $vi=$_.VersionInfo
-                Write-Host ("EXE="+$_.FullName+" VERSION="+$vi.FileVersion+" PRODUCT="+$vi.ProductName)
-                $found += $_.FullName
-              }
+          $start=Get-StartApps | Where-Object {$_.Name -match 'Firecast|RRPG'}
+          $start | Format-List *
+
+          Write-Host '=== UNINSTALL REGISTRY ==='
+          $reg=@()
+          foreach($rp in @('HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*','HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*')){
+            $reg += Get-ItemProperty $rp -ErrorAction SilentlyContinue | Where-Object {$_.DisplayName -match 'Firecast|RRPG'}
           }
+          $reg | Format-List DisplayName,DisplayVersion,InstallLocation,UninstallString,Publisher
+
           Write-Host '=== RPK ASSOCIATION ==='
           cmd /c 'reg query HKCU\Software\Classes\.rpk /s' 2>&1 | Write-Host
           cmd /c 'reg query HKCR\.rpk /s' 2>&1 | Write-Host
-          if($showExit -ne 0 -and $installExit -ne 0){ throw 'STORE_PACKAGE_UNAVAILABLE' }
-          if($found.Count -eq 0 -and -not (Get-AppxPackage | Where-Object {$_.Name -match 'Firecast|RRPG'})){ throw 'FIRECAST_INSTALL_NOT_EVIDENCED' }
+
+          $evidence = ($installExit -eq 0) -or ($listExit -eq 0) -or ($appx.Count -gt 0) -or ($start.Count -gt 0) -or ($reg.Count -gt 0)
+          if(-not $evidence){ throw "FIRECAST_INSTALL_NOT_EVIDENCED show=$showExit install=$installExit list=$listExit" }
           Write-Host 'FIRECAST_STORE_INSTALL_EVIDENCE=PASS'
