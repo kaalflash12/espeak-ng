@@ -34,6 +34,7 @@ jobs:
 
           Add-Type -AssemblyName UIAutomationClient
           Add-Type -AssemblyName UIAutomationTypes
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
           function Close-FirecastGracefully($p){
             if($null-eq$p -or $p.HasExited){return}
             try{$p.CloseMainWindow()|Out-Null}catch{}
@@ -52,37 +53,31 @@ jobs:
               }catch{}
             }
           }
+          function Get-RpkModuleId([string]$path){
+            $zip=[IO.Compression.ZipFile]::OpenRead($path)
+            try{
+              $entry=$zip.Entries|Where-Object{$_.FullName-eq'module.xml'}|Select-Object -First 1
+              if($null-eq$entry){return ''}
+              $sr=[IO.StreamReader]::new($entry.Open())
+              try{$raw=$sr.ReadToEnd()}finally{$sr.Dispose()}
+              $m=[regex]::Match($raw,'<id>\s*([^<]+?)\s*</id>','IgnoreCase')
+              if($m.Success){return $m.Groups[1].Value.Trim()}
+              return ''
+            }finally{$zip.Dispose()}
+          }
           function List-PluginIds([string]$tag){
             $plugins=Join-Path $env:APPDATA 'Firecast\Plugins'
             Write-Host "=== PLUGIN IDS $tag ==="
-            if(-not(Test-Path $plugins)){Write-Host 'PLUGIN_DIR_MISSING'; return @()}
-            $py=Join-Path $env:RUNNER_TEMP 'list-plugin-ids.py'
-            @'
-import os,sys,zipfile,re,json
-root=sys.argv[1]
-ids=[]
-for name in sorted(os.listdir(root)):
-    if not name.lower().endswith('.rpk'): continue
-    p=os.path.join(root,name)
-    try:
-        with zipfile.ZipFile(p) as z:
-            raw=z.read('module.xml').decode('utf-8','replace')
-        m=re.search(r'<id>\s*([^<]+?)\s*</id>',raw,re.I)
-        mid=m.group(1).strip() if m else ''
-        print('PLUGIN_FILE='+p+' MODULE_ID='+mid+' SIZE='+str(os.path.getsize(p)))
-        if mid: ids.append(mid)
-    except Exception as e:
-        print('PLUGIN_READ_FAIL='+p+' ERROR='+repr(e))
-print('PLUGIN_IDS_JSON='+json.dumps(ids))
-'@ | Set-Content $py -Encoding UTF8
-            $lines=& python $py $plugins
-            $lines|ForEach-Object{Write-Host $_}
-            $jsonLine=$lines|Where-Object{$_ -like 'PLUGIN_IDS_JSON=*'}|Select-Object -Last 1
-            if(-not $jsonLine){return @()}
-            return @((($jsonLine -replace '^PLUGIN_IDS_JSON=','')|ConvertFrom-Json))
+            $ids=@()
+            if(-not(Test-Path $plugins)){Write-Host 'PLUGIN_DIR_MISSING'; return $ids}
+            foreach($f in Get-ChildItem $plugins -File -Filter '*.rpk'){
+              try{$mid=Get-RpkModuleId $f.FullName}catch{$mid=''; Write-Host "PLUGIN_READ_FAIL=$($f.FullName) ERROR=$($_.Exception.Message)"}
+              Write-Host "PLUGIN_FILE=$($f.FullName) MODULE_ID=$mid SIZE=$($f.Length)"
+              if($mid-ne''){$ids+=$mid}
+            }
+            return $ids
           }
 
-          # First startup creates the normal Firecast profile/default plugins.
           $p=Start-Process -FilePath $firecast -PassThru
           Start-Sleep 10
           Invoke-ConfirmButtons
@@ -91,7 +86,6 @@ print('PLUGIN_IDS_JSON='+json.dumps(ids))
           $beforeIds=@(List-PluginIds 'BEFORE')
           if($beforeIds -contains 'DigiTerionMon.EraDaDualidade'){throw 'DigiTerion unexpectedly present before install'}
 
-          # Second startup uses the exact registered .rpk command semantics.
           $p=Start-Process -FilePath $firecast -ArgumentList ('"'+$rpk+'"') -PassThru
           Write-Host "RPK_INSTALL_PROCESS_PID=$($p.Id)"
           for($i=0;$i-lt20;$i++){Start-Sleep 2; Invoke-ConfirmButtons}
