@@ -1,0 +1,110 @@
+name: DIGIMON Gate17 Plugin Folder V5
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+  workflow_dispatch:
+
+jobs:
+  gate17-v5:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Firecast and build structure-preserving harness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+          if($LASTEXITCODE -ne 0){throw "Firecast install failed: $LASTEXITCODE"}
+          $work=Join-Path $env:RUNNER_TEMP 'g17-v5'; New-Item -ItemType Directory -Force $work|Out-Null
+          $bundle=Join-Path $work 'bundle.zip'
+          python -m pip install --quiet gdown
+          python -m gdown 'https://drive.google.com/uc?id=1LWaYGuvoVLQ-TP3Yj0nqVprosbmYe_1b' -O $bundle
+          if($LASTEXITCODE -ne 0){throw 'bundle download failed'}
+          $bh=(Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant(); Write-Host "BUNDLE_SHA256=$bh"
+          if($bh -ne '42094ab528b6f2139b0f2b09ef6741fb3a5640b5ba0f45041270c9e1f3d70bdb'){throw 'bundle hash mismatch'}
+          $unpack=Join-Path $work 'bundle'; Expand-Archive -LiteralPath $bundle -DestinationPath $unpack -Force
+          $final=Join-Path $unpack 'DIGIMON_ERA_DA_DUALIDADE_FINAL.rpk'
+          $rh=(Get-FileHash $final -Algorithm SHA256).Hash.ToLowerInvariant(); Write-Host "FINAL_RPK_SHA256=$rh"
+          if($rh -ne '3a3a61e642054f7a98cc7eefb01f0d43c8acf7c703e262b8bb55e8b63682bfef'){throw 'final RPK hash mismatch'}
+          $harness=Join-Path $work 'DigiTerionMon.EraDaDualidade.rpk'
+          $env:FINAL_RPK=$final; $env:HARNESS_RPK=$harness; $env:HARNESS_INIT='${{ github.workspace }}\ci\digimon-gate17\gate17_init_store.lua'
+          @'
+          import os, zipfile, shutil
+          src=os.environ['FINAL_RPK']; dst=os.environ['HARNESS_RPK']; init=os.environ['HARNESS_INIT']
+          with open(init,'rb') as f: replacement=f.read()
+          seen=[]
+          with zipfile.ZipFile(src,'r') as zin, zipfile.ZipFile(dst,'w') as zout:
+              for info in zin.infolist():
+                  if info.filename == 'init.lua':
+                      data=replacement
+                  else:
+                      data=zin.read(info.filename)
+                  # Preserve original metadata/attributes/path names exactly where possible.
+                  ni=zipfile.ZipInfo(info.filename, info.date_time)
+                  ni.comment=info.comment
+                  ni.extra=info.extra
+                  ni.create_system=info.create_system
+                  ni.create_version=info.create_version
+                  ni.extract_version=info.extract_version
+                  ni.flag_bits=info.flag_bits
+                  ni.volume=info.volume
+                  ni.internal_attr=info.internal_attr
+                  ni.external_attr=info.external_attr
+                  ni.compress_type=info.compress_type
+                  zout.writestr(ni,data)
+                  seen.append(info.filename)
+          assert 'init.lua' in seen
+          with zipfile.ZipFile(src,'r') as a, zipfile.ZipFile(dst,'r') as b:
+              an=[x.filename for x in a.infolist()]; bn=[x.filename for x in b.infolist()]
+              assert an==bn, (len(an),len(bn))
+              print('ZIP_ENTRY_COUNT='+str(len(an)))
+              print('ZIP_ENTRY_ORDER_IDENTICAL=1')
+              diffs=[]
+              for n in an:
+                  if n!='init.lua' and a.read(n)!=b.read(n): diffs.append(n)
+              print('NON_INIT_DIFFERENCES='+str(len(diffs)))
+              assert not diffs
+          '@ | python -
+          if($LASTEXITCODE -ne 0){throw 'structure-preserving harness build failed'}
+          Write-Host "HARNESS_SHA256=$((Get-FileHash $harness -Algorithm SHA256).Hash.ToLowerInvariant())"
+          $plugins=Join-Path $env:APPDATA 'Firecast\Plugins'; New-Item -ItemType Directory -Force $plugins|Out-Null
+          $dest=Join-Path $plugins 'DigiTerionMon.EraDaDualidade.rpk'; Copy-Item -LiteralPath $harness -Destination $dest -Force
+          "FINAL_RPK=$final"|Out-File $env:GITHUB_ENV -Append
+          "PLUGIN_DEST=$dest"|Out-File $env:GITHUB_ENV -Append
+      - name: Execute phase 1 with structure-preserving RPK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          Add-Type -AssemblyName UIAutomationClient
+          Add-Type -AssemblyName UIAutomationTypes
+          $firecast=Join-Path $env:LOCALAPPDATA 'Firecast\Firecast.exe'
+          $logDir=Join-Path $env:LOCALAPPDATA 'Firecast\LogErrors'
+          Get-Process Firecast -ErrorAction SilentlyContinue | Stop-Process -Force
+          Remove-Item (Join-Path $logDir 'Firecast-debugLog.txt') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $logDir 'Firecast-exe.txt') -Force -ErrorAction SilentlyContinue
+          $p=Start-Process -FilePath $firecast -PassThru
+          Write-Host "PHASE1_PID=$($p.Id)"
+          $deadline=(Get-Date).AddSeconds(60); $marker=$null
+          while((Get-Date)-lt $deadline -and -not $marker){
+            Start-Sleep 2
+            try{
+              $root=[Windows.Automation.AutomationElement]::RootElement
+              $all=$root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
+              foreach($e in $all){try{if($e.Current.ProcessId -eq $p.Id){$n=[string]$e.Current.Name;if($n -match 'GATE17_PHASE1_(PASS|FAIL)'){Write-Host "UI_MARKER=$n";$marker=$n;break}}}catch{}}
+            }catch{}
+          }
+          if(-not $marker){Write-Host 'GATE17_PHASE1_MARKER=TIMEOUT'}
+          foreach($fn in @('Firecast-debugLog.txt','Firecast-exe.txt')){$lp=Join-Path $logDir $fn;Write-Host "=== $fn ===";if(Test-Path $lp){Get-Content $lp -Raw|Write-Host}else{Write-Host 'MISSING'}}
+          if(!$p.HasExited){try{[void]$p.CloseMainWindow();[void]$p.WaitForExit(15000)}catch{};if(!$p.HasExited){Stop-Process -Id $p.Id -Force}}
+          if($marker -notmatch 'GATE17_PHASE1_PASS'){throw "Phase1 did not pass: $marker"}
+      - name: Restore exact final RPK
+        if: always()
+        shell: pwsh
+        run: |
+          if((Test-Path $env:FINAL_RPK) -and (Test-Path (Split-Path $env:PLUGIN_DEST -Parent))){
+            Copy-Item -LiteralPath $env:FINAL_RPK -Destination $env:PLUGIN_DEST -Force
+            $rh=(Get-FileHash $env:PLUGIN_DEST -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Host "RESTORED_RPK_SHA256=$rh"
+            if($rh -ne '3a3a61e642054f7a98cc7eefb01f0d43c8acf7c703e262b8bb55e8b63682bfef'){throw 'restore hash mismatch'}
+          }
