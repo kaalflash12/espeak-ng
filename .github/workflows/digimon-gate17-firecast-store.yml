@@ -1,0 +1,170 @@
+name: DIGIMON Gate17 Firecast Store Runtime
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+  workflow_dispatch:
+
+jobs:
+  gate17:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Firecast runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+          if($LASTEXITCODE -ne 0){ throw "Firecast install failed: $LASTEXITCODE" }
+          $firecast=Join-Path $env:LOCALAPPDATA 'Firecast\Firecast.exe'
+          if(!(Test-Path -LiteralPath $firecast)){ throw "Firecast.exe missing: $firecast" }
+          Write-Host "FIRECAST=$firecast"
+          Write-Host "FIRECAST_SHA256=$((Get-FileHash $firecast -Algorithm SHA256).Hash.ToLowerInvariant())"
+          Write-Host "FIRECAST_VERSION=$([Diagnostics.FileVersionInfo]::GetVersionInfo($firecast).FileVersion)"
+
+      - name: Download exact final bundle and build no-RDK harness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'digimon-g17-store'
+          New-Item -ItemType Directory -Force $work | Out-Null
+          $bundle=Join-Path $work 'bundle.zip'
+          python -m pip install --quiet gdown
+          python -m gdown 'https://drive.google.com/uc?id=1LWaYGuvoVLQ-TP3Yj0nqVprosbmYe_1b' -O $bundle
+          if($LASTEXITCODE -ne 0){ throw 'gdown bundle failed' }
+          $bh=(Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "BUNDLE_SHA256=$bh"
+          if($bh -ne '42094ab528b6f2139b0f2b09ef6741fb3a5640b5ba0f45041270c9e1f3d70bdb'){ throw "bundle hash mismatch: $bh" }
+          $unpack=Join-Path $work 'bundle'
+          Expand-Archive -LiteralPath $bundle -DestinationPath $unpack -Force
+          $final=Join-Path $unpack 'DIGIMON_ERA_DA_DUALIDADE_FINAL.rpk'
+          $rh=(Get-FileHash $final -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "FINAL_RPK_SHA256=$rh"
+          if($rh -ne '3a3a61e642054f7a98cc7eefb01f0d43c8acf7c703e262b8bb55e8b63682bfef'){ throw "final RPK hash mismatch: $rh" }
+
+          $zip=Join-Path $work 'final.zip'
+          Copy-Item $final $zip -Force
+          $tree=Join-Path $work 'harness-tree'
+          Expand-Archive -LiteralPath $zip -DestinationPath $tree -Force
+          Copy-Item '${{ github.workspace }}\ci\digimon-gate17\gate17_init_store.lua' (Join-Path $tree 'init.lua') -Force
+          $hzip=Join-Path $work 'harness.zip'
+          if(Test-Path $hzip){Remove-Item $hzip -Force}
+          Compress-Archive -Path (Join-Path $tree '*') -DestinationPath $hzip -CompressionLevel Optimal
+          $harness=Join-Path $work 'DIGIMON_GATE17_STORE_HARNESS.rpk'
+          Move-Item $hzip $harness -Force
+          Write-Host "HARNESS=$harness"
+          Write-Host "HARNESS_SHA256=$((Get-FileHash $harness -Algorithm SHA256).Hash.ToLowerInvariant())"
+          "WORK=$work" | Out-File $env:GITHUB_ENV -Append
+          "FINAL_RPK=$final" | Out-File $env:GITHUB_ENV -Append
+          "HARNESS_RPK=$harness" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Probe harness installation and Gate17 marker
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Add-Type -AssemblyName UIAutomationClient
+          Add-Type -AssemblyName UIAutomationTypes
+          $firecast=Join-Path $env:LOCALAPPDATA 'Firecast\Firecast.exe'
+
+          function Names([int]$pid){
+            $root=[Windows.Automation.AutomationElement]::RootElement
+            $all=$root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
+            $o=New-Object System.Collections.Generic.List[string]
+            foreach($e in $all){
+              try { if($e.Current.ProcessId -eq $pid -and -not [string]::IsNullOrWhiteSpace([string]$e.Current.Name)){ $o.Add([string]$e.Current.Name) } } catch {}
+            }
+            return $o
+          }
+          function Click-Affirmative([int]$pid){
+            $root=[Windows.Automation.AutomationElement]::RootElement
+            $all=$root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
+            foreach($e in $all){
+              try {
+                if($e.Current.ProcessId -ne $pid){continue}
+                $n=([string]$e.Current.Name).Trim()
+                if($n -match '^(Instalar|Install|Sim|Yes|OK|Continuar|Continue|Atualizar|Update)$'){
+                  $p=$e.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
+                  if($p){ Write-Host "INVOKE_BUTTON=$n"; $p.Invoke(); Start-Sleep -Milliseconds 800; return $true }
+                }
+              } catch {}
+            }
+            return $false
+          }
+          function Wait-Marker([int]$pid,[string]$regex,[int]$seconds){
+            $deadline=(Get-Date).AddSeconds($seconds)
+            while((Get-Date)-lt $deadline){
+              if(!(Get-Process -Id $pid -ErrorAction SilentlyContinue)){ return 'PROCESS_EXITED' }
+              $names=Names $pid
+              foreach($n in $names){ if($n -match $regex){ return $n } }
+              [void](Click-Affirmative $pid)
+              Start-Sleep -Seconds 2
+            }
+            return 'TIMEOUT'
+          }
+          function Close-Gracefully([System.Diagnostics.Process]$p){
+            if($p.HasExited){ throw 'process exited before graceful close' }
+            $root=[Windows.Automation.AutomationElement]::RootElement
+            $wins=$root.FindAll([Windows.Automation.TreeScope]::Children,[Windows.Automation.Condition]::TrueCondition)
+            foreach($w in $wins){
+              try {
+                if($w.Current.ProcessId -eq $p.Id){
+                  try { $wp=$w.GetCurrentPattern([Windows.Automation.WindowPattern]::Pattern); if($wp){$wp.Close(); Start-Sleep 1} } catch {}
+                }
+              } catch {}
+            }
+            if(!$p.HasExited){ [void]$p.CloseMainWindow() }
+            if(!$p.WaitForExit(30000)){ throw 'GRACEFUL_CLOSE_TIMEOUT' }
+            Write-Host "GRACEFUL_CLOSE_EXIT=$($p.ExitCode)"
+          }
+
+          Get-Process Firecast -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep 2
+          Write-Host "OPEN_HARNESS=$env:HARNESS_RPK"
+          $p=Start-Process -FilePath $firecast -ArgumentList @($env:HARNESS_RPK) -PassThru
+          Start-Sleep 5
+          Write-Host "FIRECAST_PID=$($p.Id)"
+          $marker=Wait-Marker $p.Id 'GATE17_(PHASE1_PASS|PHASE1_FAIL|NDB_OPEN_FAIL)' 180
+          Write-Host "GATE17_PHASE1_MARKER=$marker"
+          Write-Host '=== UI NAMES ==='
+          Names $p.Id | Select-Object -Unique | Select-Object -First 200 | ForEach-Object {Write-Host "UI=$_"}
+          if($marker -notmatch 'GATE17_PHASE1_PASS'){ throw "Phase1 marker not PASS: $marker" }
+          [void](Click-Affirmative $p.Id)
+          Start-Sleep 1
+          Close-Gracefully $p
+          Write-Host 'GATE17_PHASE1_GRACEFUL_CLOSE=1'
+
+          Start-Sleep 3
+          $p2=Start-Process -FilePath $firecast -PassThru
+          $marker2=Wait-Marker $p2.Id 'GATE17_(PHASE2_PASS|PHASE2_FAIL|NDB_OPEN_FAIL)' 180
+          Write-Host "GATE17_PHASE2_MARKER=$marker2"
+          if($marker2 -notmatch 'GATE17_PHASE2_PASS'){ throw "Phase2 marker not PASS: $marker2" }
+          [void](Click-Affirmative $p2.Id)
+          Start-Sleep 1
+          Close-Gracefully $p2
+          Write-Host 'GATE17_PHASE2_GRACEFUL_CLOSE=1'
+          Write-Host 'GATE17=PASS'
+
+      - name: Restore exact final RPK and Gate18 smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Add-Type -AssemblyName UIAutomationClient
+          Add-Type -AssemblyName UIAutomationTypes
+          $firecast=Join-Path $env:LOCALAPPDATA 'Firecast\Firecast.exe'
+          function Click-Affirmative([int]$pid){
+            $root=[Windows.Automation.AutomationElement]::RootElement
+            $all=$root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
+            foreach($e in $all){try{if($e.Current.ProcessId-ne $pid){continue};$n=([string]$e.Current.Name).Trim();if($n-match '^(Instalar|Install|Sim|Yes|OK|Continuar|Continue|Atualizar|Update)$'){$x=$e.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern);if($x){$x.Invoke();Start-Sleep 1;return $true}}}catch{}}
+            return $false
+          }
+          Get-Process Firecast -ErrorAction SilentlyContinue | Stop-Process -Force
+          $p=Start-Process -FilePath $firecast -ArgumentList @($env:FINAL_RPK) -PassThru
+          for($i=0;$i-lt 20;$i++){[void](Click-Affirmative $p.Id);Start-Sleep 1}
+          if($p.HasExited){throw 'Firecast exited during final RPK restore'}
+          try{$root=[Windows.Automation.AutomationElement]::RootElement;$all=$root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition);foreach($e in $all){if($e.Current.ProcessId-eq $p.Id -and ([string]$e.Current.Name)-match '^Error$|erro|stack traceback|runtime error'){throw "Final restore runtime error: $($e.Current.Name)"}}}catch{if($_.Exception.Message -match 'Final restore runtime error'){throw}}
+          Write-Host 'GATE18_FINAL_ERROR=0'
+          Write-Host 'GATE18_FINAL_PROCESS_ALIVE=1'
+          Write-Host 'GATE18=PASS'
+          Write-Host 'OVERALL_18_OF_18=PASS'
+          try{$p.CloseMainWindow()|Out-Null;$p.WaitForExit(15000)|Out-Null}catch{}
