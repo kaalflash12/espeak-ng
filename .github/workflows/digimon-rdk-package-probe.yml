@@ -1,0 +1,26 @@
+name: DIGIMON RDK Package Probe
+
+on:
+  push:
+    branches:
+      - digimon-ci-temp-20260830
+    paths:
+      - .github/workflows/digimon-rdk-package-probe.yml
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - name: Search package managers for Firecast SDK/RDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          Write-Host '=== WINGET FIRECAST ==='
+          winget search Firecast --accept-source-agreements
+          Write-Host '=== WINGET RDK ==='
+          winget search RDK --accept-source-agreements
+          Write-Host '=== SCOOP SEARCH ==='
+          if(Get-Command scoop -ErrorAction SilentlyContinue){scoop search firecast; scoop search rdk}
+          Write-Host '=== CHOCO SEARCH ==='
+          choco search firecast --exact
+          choco search rdk
