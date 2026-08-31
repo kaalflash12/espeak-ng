@@ -1,0 +1,48 @@
+name: DIGIMON RDK Verified Proxy Probe
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - name: Fetch official RDK through independent relays
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $official = 'https://firecast.app/downloads/RDK3.7.b.exe'
+          $targets = @(
+            @{n='direct'; u=$official},
+            @{n='allorigins'; u='https://api.allorigins.win/raw?url=https%3A%2F%2Ffirecast.app%2Fdownloads%2FRDK3.7.b.exe'},
+            @{n='corsproxy'; u='https://corsproxy.io/?url=https%3A%2F%2Ffirecast.app%2Fdownloads%2FRDK3.7.b.exe'},
+            @{n='isomorphic'; u='https://cors.isomorphic-git.org/https://firecast.app/downloads/RDK3.7.b.exe'},
+            @{n='thingproxy'; u='https://thingproxy.freeboard.io/fetch/https://firecast.app/downloads/RDK3.7.b.exe'}
+          )
+          $ok = @()
+          foreach($t in $targets){
+            $p = Join-Path $env:RUNNER_TEMP ($t.n + '.exe')
+            Remove-Item $p -Force -ErrorAction SilentlyContinue
+            Write-Host "=== FETCH $($t.n) ==="
+            & curl.exe -L --fail --silent --show-error --max-time 90 --retry 1 -A 'Mozilla/5.0' -o $p $t.u
+            if($LASTEXITCODE -ne 0 -or !(Test-Path $p)){ Write-Host "FETCH_FAIL=$($t.n)"; continue }
+            $fi = Get-Item $p
+            $bytes = [IO.File]::ReadAllBytes($p)
+            $mz = if($bytes.Length -ge 2){ [Text.Encoding]::ASCII.GetString($bytes,0,2) } else { '' }
+            $sha = (Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Host "FETCH_OK=$($t.n) SIZE=$($fi.Length) MZ=$mz SHA256=$sha"
+            if($mz -ne 'MZ' -or $fi.Length -lt 100000){ Write-Host "REJECT_NON_PE=$($t.n)"; continue }
+            $vi = [Diagnostics.FileVersionInfo]::GetVersionInfo($p)
+            Write-Host "VERSION=$($vi.FileVersion) PRODUCT=$($vi.ProductName) PRODUCT_VERSION=$($vi.ProductVersion) COMPANY=$($vi.CompanyName)"
+            $sig = Get-AuthenticodeSignature $p
+            Write-Host "SIGNATURE_STATUS=$($sig.Status) SIGNER=$($sig.SignerCertificate.Subject)"
+            $ok += [pscustomobject]@{Name=$t.n; Path=$p; Sha=$sha; Size=$fi.Length; Version=$vi.FileVersion; Product=$vi.ProductName; Sig=$sig.Status}
+          }
+          if($ok.Count -eq 0){ throw 'NO_VALID_PE_DOWNLOAD' }
+          $groups = $ok | Group-Object Sha | Sort-Object Count -Descending
+          foreach($g in $groups){ Write-Host "SHA_GROUP=$($g.Name) COUNT=$($g.Count) SOURCES=$(($g.Group.Name -join ','))" }
+          $best = $groups | Select-Object -First 1
+          if($best.Count -lt 2){ throw 'NO_TWO_SOURCE_SHA_CONSENSUS' }
+          $candidate = $best.Group | Select-Object -First 1
+          Write-Host "RDK_VERIFIED_SHA=$($candidate.Sha) SIZE=$($candidate.Size) VERSION=$($candidate.Version) PRODUCT=$($candidate.Product) SIG=$($candidate.Sig)"
