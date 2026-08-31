@@ -1,0 +1,39 @@
+name: DIGIMON Gate 17-18 Public CI
+
+on:
+  push:
+    branches:
+      - digimon-ci-temp-20260830
+    paths:
+      - .github/workflows/digimon-gate17-18-public-ci.yml
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download exact final source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          python -m pip install --disable-pip-version-check --quiet gdown
+          $dst=Join-Path $PWD 'ci\digimon-gate17\final-source.zip'
+          python -m gdown 'https://drive.google.com/uc?id=1LWaYGuvoVLQ-TP3Yj0nqVprosbmYe_1b' -O $dst
+          $sha=(Get-FileHash $dst -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha-ne '0dde069bbe7a53e88d027f31d4ebfc4d25fee7f1f51b91fdd8e66199d2f65624'){throw "Source SHA mismatch: $sha"}
+          Write-Host "SOURCE_DOWNLOAD_SHA256=$sha"
+
+      - name: Execute Gates 14-15 control and Gates 17-18
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          & .\ci\digimon-gate17\run_gate17.ps1
+
+      - name: Print final evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $ev='.\ci\digimon-gate17\gate17-output\evidence.txt'
+          if(Test-Path $ev){Get-Content $ev}else{Write-Host 'EVIDENCE_FILE_MISSING'}
