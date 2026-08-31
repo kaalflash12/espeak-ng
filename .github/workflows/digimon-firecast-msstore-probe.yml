@@ -1,0 +1,41 @@
+name: DIGIMON Firecast Microsoft Store Probe
+on:
+  push:
+    branches: [digimon-fetch-matrix-20260830]
+    paths: [.github/workflows/digimon-firecast-msstore-probe.yml]
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Inspect Store product
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          winget source update
+          winget show --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements
+          Write-Host "SHOW_EXIT=$LASTEXITCODE"
+      - name: Install Firecast from Microsoft Store
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+          if($LASTEXITCODE-ne 0){throw "STORE_INSTALL_EXIT=$LASTEXITCODE"}
+          Write-Host 'STORE_INSTALL_PASS=1'
+      - name: Discover runtime and SDK files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          Write-Host '=== APPX ==='
+          Get-AppxPackage -AllUsers | Where-Object {$_.Name -match 'Firecast|RRPG'} | Format-List Name,PackageFullName,InstallLocation,PackageFamilyName
+          Write-Host '=== START APPS ==='
+          Get-StartApps | Where-Object {$_.Name -match 'Firecast|RRPG'} | Format-Table -AutoSize
+          Write-Host '=== PROCESSES/FILES ==='
+          $roots=@($env:LOCALAPPDATA,$env:APPDATA,$env:ProgramFiles,${env:ProgramFiles(x86)}) | Where-Object {$_ -and (Test-Path $_)}
+          foreach($r in $roots){
+            Write-Host "ROOT=$r"
+            Get-ChildItem $r -Recurse -File -ErrorAction SilentlyContinue | Where-Object {$_.Name -match '^(rdk|RRPGFichas|Firecast).*\.exe$'} | Select-Object -First 100 FullName,Length | Format-Table -AutoSize
+          }
+          $sdk=Join-Path $env:LOCALAPPDATA 'FirecastSDK3'
+          Write-Host "SDK_DIR_EXISTS=$(Test-Path $sdk)"
+          if(Test-Path $sdk){Get-ChildItem $sdk -Recurse -File | Select FullName,Length | Format-Table -AutoSize}
