@@ -1,0 +1,36 @@
+name: DIGIMON RDK Dual Official Probe
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - name: Probe both official RDK URLs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          $urls=@(
+            'https://firecast.app/downloads/RDK3.7.b.exe',
+            'https://firecast.app/downloads/RDK3.7b.exe'
+          )
+          $valid=@()
+          foreach($u in $urls){
+            $name=Split-Path $u -Leaf
+            $p=Join-Path $env:RUNNER_TEMP $name
+            Remove-Item $p -Force -ErrorAction SilentlyContinue
+            Write-Host "TRY=$u"
+            & curl.exe -L --fail --silent --show-error --max-time 90 --retry 1 -A 'Mozilla/5.0' -o $p $u
+            $ec=$LASTEXITCODE
+            if($ec -ne 0 -or !(Test-Path $p)){ Write-Host "FETCH_FAIL URL=$u EXIT=$ec"; continue }
+            $fi=Get-Item $p
+            $b=[IO.File]::ReadAllBytes($p)
+            $mz=if($b.Length-ge 2){[Text.Encoding]::ASCII.GetString($b,0,2)}else{''}
+            $sha=(Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant()
+            $vi=[Diagnostics.FileVersionInfo]::GetVersionInfo($p)
+            $sig=Get-AuthenticodeSignature $p
+            Write-Host "FETCH_OK URL=$u SIZE=$($fi.Length) MZ=$mz SHA256=$sha VERSION=$($vi.FileVersion) PRODUCT=$($vi.ProductName) SIG=$($sig.Status) SIGNER=$($sig.SignerCertificate.Subject)"
+            if($mz -eq 'MZ' -and $fi.Length -gt 100000){$valid += [pscustomobject]@{Url=$u;Path=$p;Sha=$sha;Size=$fi.Length;Version=$vi.FileVersion;Product=$vi.ProductName;Sig=$sig.Status}}
+          }
+          if($valid.Count -eq 0){throw 'NO_VALID_OFFICIAL_RDK_PE'}
+          foreach($v in $valid){Write-Host "RDK_OFFICIAL_VALID URL=$($v.Url) SHA256=$($v.Sha) SIZE=$($v.Size) VERSION=$($v.Version) PRODUCT=$($v.Product) SIG=$($v.Sig)"}
