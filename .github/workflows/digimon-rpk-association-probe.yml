@@ -1,0 +1,94 @@
+name: DIGIMON Firecast RPK Association Probe
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install Firecast and inspect RPK integration
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+          Write-Host "INSTALL_EXIT=$LASTEXITCODE"
+          $firecast=Join-Path $env:LOCALAPPDATA 'Firecast\Firecast.exe'
+          Write-Host "FIRECAST=$firecast"
+
+          Write-Host '=== RPK REGISTRY KEYS ==='
+          $roots=@(
+            'Registry::HKEY_CLASSES_ROOT\.rpk',
+            'HKCU:\Software\Classes\.rpk',
+            'HKLM:\Software\Classes\.rpk'
+          )
+          foreach($k in $roots){
+            Write-Host "KEY=$k EXISTS=$(Test-Path $k)"
+            if(Test-Path $k){
+              Get-ItemProperty $k | Format-List *
+              $default=(Get-Item $k).GetValue('')
+              Write-Host "DEFAULT=$default"
+              if($default){
+                foreach($base in @('Registry::HKEY_CLASSES_ROOT','HKCU:\Software\Classes','HKLM:\Software\Classes')){
+                  $pk=Join-Path $base $default
+                  if(Test-Path $pk){
+                    Write-Host "PROGID_KEY=$pk"
+                    Get-ChildItem $pk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+                      $d=$_.GetValue('')
+                      Write-Host "SUBKEY=$($_.Name) DEFAULT=$d"
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          Write-Host '=== FIRECAST APPLICATION REGISTRY ==='
+          foreach($base in @('Registry::HKEY_CLASSES_ROOT\Applications\Firecast.exe','HKCU:\Software\Classes\Applications\Firecast.exe','HKLM:\Software\Classes\Applications\Firecast.exe')){
+            Write-Host "APPKEY=$base EXISTS=$(Test-Path $base)"
+            if(Test-Path $base){Get-ChildItem $base -Recurse | ForEach-Object {Write-Host "SUBKEY=$($_.Name) DEFAULT=$($_.GetValue(''))"}}
+          }
+
+          Write-Host '=== START MENU LINK TARGET ==='
+          $lnk=Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Firecast\Firecast.lnk'
+          if(Test-Path $lnk){
+            $w=New-Object -ComObject WScript.Shell
+            $s=$w.CreateShortcut($lnk)
+            Write-Host "LNK_TARGET=$($s.TargetPath)"
+            Write-Host "LNK_ARGS=$($s.Arguments)"
+            Write-Host "LNK_WORKDIR=$($s.WorkingDirectory)"
+          }
+
+          Write-Host '=== FIRECAST BINARY STRINGS AROUND RPK/PLUGIN ==='
+          @'
+import re, os
+p=os.path.expandvars(r'%LOCALAPPDATA%\Firecast\Firecast.exe')
+b=open(p,'rb').read()
+for pat in [b'.rpk',b'RPK',b'installPlugin',b'plugin',b'Plugin']:
+    print('PATTERN',pat)
+    seen=set(); c=0
+    for m in re.finditer(re.escape(pat),b):
+        s=max(0,m.start()-160); e=min(len(b),m.end()+240)
+        chunk=b[s:e]
+        txt=''.join(chr(x) if 32<=x<127 else ' ' for x in chunk)
+        txt=' '.join(txt.split())
+        if txt not in seen:
+            seen.add(txt); print(txt[:600]); c+=1
+            if c>=20: break
+'@ | python -
+
+          Write-Host '=== USER DATA CREATED BY 15s START ==='
+          $t0=Get-Date
+          $p=Start-Process $firecast -PassThru
+          Start-Sleep 15
+          try{[void]$p.CloseMainWindow();[void]$p.WaitForExit(10000)}catch{}
+          if(!$p.HasExited){Stop-Process -Id $p.Id -Force}
+          foreach($root in @($env:LOCALAPPDATA,$env:APPDATA)){
+            Get-ChildItem $root -File -Recurse -ErrorAction SilentlyContinue |
+              Where-Object {$_.LastWriteTime -ge $t0} |
+              Select-Object -First 300 FullName,Length,LastWriteTime |
+              ForEach-Object {Write-Host "NEWFILE=$($_.FullName)|$($_.Length)|$($_.LastWriteTime.ToString('o'))"}
+          }
+          exit 0
