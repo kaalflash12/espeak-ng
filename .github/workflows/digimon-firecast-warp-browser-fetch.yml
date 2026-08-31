@@ -1,0 +1,152 @@
+name: DIGIMON Firecast WARP Browser Fetch
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+    paths: [.github/workflows/digimon-firecast-warp-browser-fetch.yml]
+  workflow_dispatch:
+jobs:
+  fetch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - name: Install and verify WARP local proxy
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ noble main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cloudflare-warp xvfb
+          sudo systemctl enable --now warp-svc
+          sleep 2
+          warp-cli --accept-tos registration new || warp-cli --accept-tos registration show
+          warp-cli --accept-tos tunnel protocol set MASQUE
+          warp-cli --accept-tos mode proxy
+          warp-cli --accept-tos proxy port 40000
+          warp-cli --accept-tos connect
+          connected=0
+          for i in $(seq 1 60); do
+            s=$(warp-cli --accept-tos status || true)
+            echo "$s"
+            if printf '%s\n' "$s" | grep -qx 'Status update: Connected'; then connected=1; break; fi
+            sleep 1
+          done
+          test "$connected" = 1
+          curl --socks5-hostname 127.0.0.1:40000 -fsSL --connect-timeout 20 --max-time 40 https://www.cloudflare.com/cdn-cgi/trace | tee /tmp/warp-trace.txt
+          grep -Eq '^warp=(on|plus)$' /tmp/warp-trace.txt
+          echo 'WARP_BROWSER_PROXY_READY'
+      - name: Install browser driver
+        shell: bash
+        run: |
+          set -euxo pipefail
+          which google-chrome || which google-chrome-stable || true
+          node --version
+          npm --version
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright-core@1.55.0
+      - name: Solve Cloudflare in real Chrome and fetch installers
+        shell: bash
+        run: |
+          cat > /tmp/firecast-browser.js <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const { chromium } = require('playwright-core');
+          const chrome = fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' : '/usr/bin/google-chrome-stable';
+          const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
+          const targets = [
+            ['rdk.exe', ['https://firecast.app/downloads/RDK3.7.b.exe','https://firecast.app/downloads/RDK3.7b.exe']],
+            ['firecast.exe', ['https://firecast.app/downloads/firecast8_13_win64.exe']]
+          ];
+          (async () => {
+            const browser = await chromium.launch({
+              executablePath: chrome,
+              headless: false,
+              proxy: { server: 'socks5://127.0.0.1:40000' },
+              args: [
+                '--no-sandbox', '--disable-dev-shm-usage',
+                '--disable-blink-features=AutomationControlled',
+                '--window-size=1365,768',
+                '--lang=pt-BR,pt'
+              ]
+            });
+            const context = await browser.newContext({
+              userAgent: UA,
+              viewport: { width: 1365, height: 768 },
+              locale: 'pt-BR',
+              timezoneId: 'America/Sao_Paulo',
+              acceptDownloads: true
+            });
+            await context.addInitScript(() => {
+              Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+              Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR','pt','en-US','en'] });
+              Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+              window.chrome = window.chrome || { runtime: {} };
+            });
+            const page = await context.newPage();
+            page.on('console', m => console.log('BROWSER_CONSOLE', m.type(), m.text().slice(0,500)));
+            page.on('response', r => { if (r.url().includes('firecast.app')) console.log('RESPONSE', r.status(), r.url()); });
+            console.log('OPEN_HOME');
+            await page.goto('https://firecast.app/pt_br/para-programadores/', { waitUntil:'domcontentloaded', timeout:90000 }).catch(e => console.log('HOME_GOTO_ERR', e.message));
+            for (let i=0;i<12;i++) {
+              const title = await page.title().catch(()=> '');
+              const url = page.url();
+              const text = (await page.locator('body').innerText({timeout:3000}).catch(()=>'' )).replace(/\s+/g,' ').slice(0,300);
+              console.log(`HOME_STATE_${i} TITLE=${title} URL=${url} TEXT=${text}`);
+              const cookies = await context.cookies('https://firecast.app');
+              console.log('COOKIE_NAMES', cookies.map(c=>c.name).join(','));
+              if (!/just a moment|verifying|checking your browser|performing security verification/i.test(title+' '+text)) break;
+              await page.waitForTimeout(5000);
+            }
+            const homeTitle = await page.title().catch(()=> '');
+            const homeText = (await page.locator('body').innerText({timeout:3000}).catch(()=>'' )).replace(/\s+/g,' ').slice(0,500);
+            console.log('HOME_FINAL', homeTitle, homeText);
+            const cookieJar = await context.cookies('https://firecast.app');
+            console.log('HOME_COOKIES', JSON.stringify(cookieJar.map(c=>({name:c.name,domain:c.domain,expires:c.expires}))));
+
+            async function fetchTarget(name, urls) {
+              for (const url of urls) {
+                console.log('TRY_DOWNLOAD', name, url);
+                let download = null;
+                const dp = page.waitForEvent('download', { timeout: 90000 }).then(d => { download=d; return d; }).catch(()=>null);
+                await page.goto(url, { waitUntil:'domcontentloaded', timeout:90000 }).catch(e => console.log('DL_GOTO', e.message));
+                download = await dp;
+                if (download) {
+                  await download.saveAs(name);
+                  const size = fs.statSync(name).size;
+                  const head = fs.readFileSync(name).subarray(0,2).toString('ascii');
+                  console.log('BROWSER_DOWNLOAD', name, size, head, download.suggestedFilename());
+                  if (head === 'MZ' && size > 100000) return true;
+                  fs.unlinkSync(name);
+                }
+                const title = await page.title().catch(()=> '');
+                const text = (await page.locator('body').innerText({timeout:3000}).catch(()=>'' )).replace(/\s+/g,' ').slice(0,500);
+                console.log('DOWNLOAD_PAGE_STATE', title, page.url(), text);
+                const cookies = await context.cookies('https://firecast.app');
+                console.log('DOWNLOAD_COOKIES', cookies.map(c=>c.name).join(','));
+                for (let i=0;i<12;i++) {
+                  if (!/just a moment|verifying|checking your browser|performing security verification/i.test(title+' '+text)) break;
+                  await page.waitForTimeout(5000);
+                }
+              }
+              return false;
+            }
+            for (const [name, urls] of targets) {
+              const ok = await fetchTarget(name, urls);
+              if (!ok) throw new Error('NO_VALID_PE_'+name);
+            }
+            await browser.close();
+          })().catch(e => { console.error('FATAL', e.stack || e); process.exit(1); });
+          NODE
+          xvfb-run -a node /tmp/firecast-browser.js
+          for f in rdk.exe firecast.exe; do
+            test "$(xxd -p -l 2 "$f")" = 4d5a
+            test "$(stat -c%s "$f")" -gt 100000
+            echo "BROWSER_FETCH_OK FILE=$f SIZE=$(stat -c%s "$f") SHA256=$(sha256sum "$f" | awk '{print $1}') TYPE=$(file -b "$f")"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firecast-installers-warp-browser
+          path: |
+            rdk.exe
+            firecast.exe
+          retention-days: 1
