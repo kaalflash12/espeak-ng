@@ -1,0 +1,83 @@
+name: DIGIMON Gate17 Plugin Folder Diagnose V4
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Firecast and build harness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+          if($LASTEXITCODE -ne 0){throw "Firecast install failed: $LASTEXITCODE"}
+          $work=Join-Path $env:RUNNER_TEMP 'g17-v4'; New-Item -ItemType Directory -Force $work|Out-Null
+          $bundle=Join-Path $work 'bundle.zip'
+          python -m pip install --quiet gdown
+          python -m gdown 'https://drive.google.com/uc?id=1LWaYGuvoVLQ-TP3Yj0nqVprosbmYe_1b' -O $bundle
+          if($LASTEXITCODE -ne 0){throw 'bundle download failed'}
+          $bh=(Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant(); Write-Host "BUNDLE_SHA256=$bh"
+          if($bh -ne '42094ab528b6f2139b0f2b09ef6741fb3a5640b5ba0f45041270c9e1f3d70bdb'){throw 'bundle hash mismatch'}
+          $unpack=Join-Path $work 'bundle'; Expand-Archive -LiteralPath $bundle -DestinationPath $unpack -Force
+          $final=Join-Path $unpack 'DIGIMON_ERA_DA_DUALIDADE_FINAL.rpk'
+          $rh=(Get-FileHash $final -Algorithm SHA256).Hash.ToLowerInvariant(); Write-Host "FINAL_RPK_SHA256=$rh"
+          if($rh -ne '3a3a61e642054f7a98cc7eefb01f0d43c8acf7c703e262b8bb55e8b63682bfef'){throw 'final RPK hash mismatch'}
+          $zip=Join-Path $work 'final.zip'; Copy-Item -LiteralPath $final -Destination $zip -Force
+          $tree=Join-Path $work 'tree'; Expand-Archive -LiteralPath $zip -DestinationPath $tree -Force
+          Write-Host '=== MODULE XML ==='
+          Get-Content (Join-Path $tree 'module.xml') -Raw | Write-Host
+          Copy-Item '${{ github.workspace }}\ci\digimon-gate17\gate17_init_store.lua' (Join-Path $tree 'init.lua') -Force
+          $hz=Join-Path $work 'harness.zip'; Compress-Archive -Path (Join-Path $tree '*') -DestinationPath $hz -CompressionLevel Optimal
+          $harness=Join-Path $work 'DigiTerionMon.EraDaDualidade.rpk'; Move-Item -LiteralPath $hz -Destination $harness -Force
+          $plugins=Join-Path $env:APPDATA 'Firecast\Plugins'; New-Item -ItemType Directory -Force $plugins|Out-Null
+          $dest=Join-Path $plugins 'DigiTerionMon.EraDaDualidade.rpk'; Copy-Item -LiteralPath $harness -Destination $dest -Force
+          Write-Host "HARNESS_SHA256=$((Get-FileHash $dest -Algorithm SHA256).Hash.ToLowerInvariant())"
+          "PLUGIN_DEST=$dest"|Out-File $env:GITHUB_ENV -Append
+      - name: Launch and dump loader diagnostics
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          Add-Type -AssemblyName UIAutomationClient
+          Add-Type -AssemblyName UIAutomationTypes
+          $firecast=Join-Path $env:LOCALAPPDATA 'Firecast\Firecast.exe'
+          $logDir=Join-Path $env:LOCALAPPDATA 'Firecast\LogErrors'
+          Get-Process Firecast -ErrorAction SilentlyContinue | Stop-Process -Force
+          Remove-Item (Join-Path $logDir 'Firecast-debugLog.txt') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $logDir 'Firecast-exe.txt') -Force -ErrorAction SilentlyContinue
+          $p=Start-Process -FilePath $firecast -PassThru
+          Write-Host "FIRECAST_PID=$($p.Id)"
+          Start-Sleep 30
+          Write-Host "PROCESS_ALIVE=$(-not $p.HasExited)"
+          Write-Host '=== UI ==='
+          try {
+            $root=[Windows.Automation.AutomationElement]::RootElement
+            $all=$root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
+            foreach($e in $all){try{if($e.Current.ProcessId -eq $p.Id){$n=[string]$e.Current.Name;if(-not [string]::IsNullOrWhiteSpace($n)){Write-Host "UI=$n"}}}catch{}}
+          } catch { Write-Host "UI_ENUM_ERROR=$($_.Exception.Message)" }
+          foreach($fn in @('Firecast-debugLog.txt','Firecast-exe.txt')) {
+            $lp=Join-Path $logDir $fn
+            Write-Host "=== $fn ==="
+            if(Test-Path $lp){Get-Content $lp -Raw | Write-Host}else{Write-Host 'MISSING'}
+          }
+          Write-Host '=== FIRECAST APPDATA FILES ==='
+          $app=Join-Path $env:APPDATA 'Firecast'
+          Get-ChildItem $app -Recurse -File -ErrorAction SilentlyContinue | Sort-Object FullName | ForEach-Object {
+            Write-Host "FILE=$($_.FullName)|$($_.Length)"
+          }
+          Write-Host '=== SMALL TEXT STATE MATCHES ==='
+          Get-ChildItem $app -Recurse -File -ErrorAction SilentlyContinue | Where-Object {$_.Length -lt 2097152 -and $_.Extension -notin @('.rpk','.png','.jpg','.jpeg','.gif','.wav','.mp3','.dll','.exe')} | ForEach-Object {
+            try {
+              $txt=Get-Content $_.FullName -Raw -ErrorAction Stop
+              if($txt -match '(?i)DigiTerionMon|EraDaDualidade|plugin|module|digest|gate17'){
+                Write-Host "=== MATCH $($_.FullName) ==="
+                ($txt -split "`r?`n" | Where-Object {$_ -match '(?i)DigiTerionMon|EraDaDualidade|plugin|module|digest|gate17'} | Select-Object -First 120) | ForEach-Object {Write-Host $_}
+              }
+            } catch {}
+          }
+          if(!$p.HasExited){try{[void]$p.CloseMainWindow();[void]$p.WaitForExit(15000)}catch{};if(!$p.HasExited){Stop-Process -Id $p.Id -Force}}
+          Write-Host 'DIAGNOSE_V4_COMPLETE=1'
