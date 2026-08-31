@@ -1,0 +1,41 @@
+name: DIGIMON Firecast Store Command Probe
+on:
+  push:
+    branches: [digimon-fetch-matrix-20260830]
+    paths: [.github/workflows/digimon-firecast-store-command-probe.yml]
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - name: Install Store Firecast
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+          if($LASTEXITCODE-ne 0){throw "INSTALL_EXIT=$LASTEXITCODE"}
+      - name: Inspect Firecast executable and RPK command
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $fc=Join-Path $env:LOCALAPPDATA 'Firecast\Firecast.exe'
+          Write-Host "FIRECAST_PATH=$fc EXISTS=$(Test-Path $fc)"
+          if(-not(Test-Path $fc)){throw 'FIRECAST_EXE_MISSING'}
+          $fi=Get-Item $fc
+          $vi=[Diagnostics.FileVersionInfo]::GetVersionInfo($fc)
+          $sha=(Get-FileHash $fc -Algorithm SHA256).Hash.ToLowerInvariant()
+          $sig=Get-AuthenticodeSignature $fc
+          Write-Host "FIRECAST_SIZE=$($fi.Length) SHA256=$sha FILE_VERSION=$($vi.FileVersion) PRODUCT_VERSION=$($vi.ProductVersion) PRODUCT=$($vi.ProductName) SIG=$($sig.Status) SIGNER=$($sig.SignerCertificate.Subject)"
+          Write-Host '=== FIRECAST DIR ==='
+          Get-ChildItem (Split-Path $fc) -File | Select-Object Name,Length | Format-Table -AutoSize
+          foreach($key in @(
+            'Registry::HKEY_CURRENT_USER\Software\Classes\.rpk',
+            'Registry::HKEY_CURRENT_USER\Software\Classes\firecast.rpk.installer',
+            'Registry::HKEY_CURRENT_USER\Software\Classes\firecast.rpk.installer\shell\open\command',
+            'Registry::HKEY_CURRENT_USER\Software\Classes\firecast',
+            'Registry::HKEY_CURRENT_USER\Software\Classes\firecast\shell\open\command'
+          )){
+            Write-Host "=== KEY $key ==="
+            if(Test-Path $key){Get-ItemProperty $key | Format-List *}else{Write-Host 'MISSING'}
+          }
+          Write-Host 'COMMAND_PROBE_PASS=1'
