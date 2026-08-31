@@ -6,25 +6,37 @@ on:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
-      - name: Install and start Tor
+      - name: Install and bootstrap Tor daemon
         shell: bash
         run: |
           set -euxo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq tor
-          sudo systemctl restart tor || sudo service tor restart
-          for i in $(seq 1 30); do
-            if nc -z 127.0.0.1 9050; then break; fi
+          sudo systemctl stop tor tor@default 2>/dev/null || true
+          sudo pkill -x tor 2>/dev/null || true
+          sudo rm -rf /tmp/digimon-tor
+          mkdir -p /tmp/digimon-tor
+          tor --SocksPort 9050 --DataDirectory /tmp/digimon-tor --Log 'notice file /tmp/digimon-tor.log' >/tmp/digimon-tor.stdout 2>&1 &
+          echo $! > /tmp/digimon-tor.pid
+          ready=0
+          for i in $(seq 1 90); do
+            if grep -q 'Bootstrapped 100%' /tmp/digimon-tor.log 2>/dev/null && nc -z 127.0.0.1 9050; then ready=1; break; fi
+            if ! kill -0 "$(cat /tmp/digimon-tor.pid)" 2>/dev/null; then
+              cat /tmp/digimon-tor.log /tmp/digimon-tor.stdout 2>/dev/null || true
+              exit 1
+            fi
             sleep 1
           done
-          nc -z 127.0.0.1 9050
-          echo 'TOR_READY'
+          cat /tmp/digimon-tor.log || true
+          test "$ready" = 1
+          echo 'TOR_BOOTSTRAPPED_100'
+          curl --socks5-hostname 127.0.0.1:9050 --connect-timeout 20 --max-time 30 -sS https://check.torproject.org/api/ip | tee /tmp/tor-ip.json
       - name: Fetch official RDK through Tor
         shell: bash
         run: |
-          set -u
+          set -uo pipefail
           urls=(
             'https://firecast.app/downloads/RDK3.7.b.exe'
             'https://firecast.app/downloads/RDK3.7b.exe'
@@ -33,13 +45,14 @@ jobs:
           n=0
           for u in "${urls[@]}"; do
             n=$((n+1)); p="rdk-${n}.exe"
+            rm -f "$p"
             echo "=== $u ==="
             code=$(curl --socks5-hostname 127.0.0.1:9050 -L -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152 Safari/537.36' --connect-timeout 30 --max-time 120 -sS -w '%{http_code}' -o "$p" "$u" || true)
             size=$(stat -c%s "$p" 2>/dev/null || echo 0)
-            head=$(xxd -p -l 2 "$p" 2>/dev/null || true)
-            sha=$(sha256sum "$p" 2>/dev/null | awk '{print $1}')
-            echo "RESULT URL=$u HTTP=$code SIZE=$size HEADHEX=$head SHA256=$sha"
-            if [ "$code" = 200 ] && [ "$head" = 4d5a ] && [ "$size" -gt 100000 ]; then
+            headhex=$(xxd -p -l 2 "$p" 2>/dev/null || true)
+            sha=$(sha256sum "$p" 2>/dev/null | awk '{print $1}' || true)
+            echo "RESULT URL=$u HTTP=$code SIZE=$size HEADHEX=$headhex SHA256=$sha"
+            if [ "$code" = 200 ] && [ "$headhex" = 4d5a ] && [ "$size" -gt 100000 ]; then
               cp "$p" rdk-verified.exe
               echo "VALID_RDK_URL=$u"
               echo "VALID_RDK_SHA=$sha"
@@ -47,7 +60,7 @@ jobs:
               break
             fi
           done
-          if [ "$ok" -ne 1 ]; then exit 1; fi
+          test "$ok" = 1
       - uses: actions/upload-artifact@v4
         with:
           name: rdk-verified
