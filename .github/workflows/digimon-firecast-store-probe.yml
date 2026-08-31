@@ -1,0 +1,50 @@
+name: DIGIMON Firecast Store Probe
+
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+    paths: [.github/workflows/digimon-firecast-store-probe.yml]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Install Firecast from Microsoft Store ID
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          Write-Host '=== WINGET VERSION/SOURCES ==='
+          winget --version
+          winget source list
+          Write-Host '=== STORE SHOW ==='
+          winget show --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements
+          $showExit=$LASTEXITCODE
+          Write-Host "STORE_SHOW_EXIT=$showExit"
+          Write-Host '=== STORE INSTALL ==='
+          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+          $installExit=$LASTEXITCODE
+          Write-Host "STORE_INSTALL_EXIT=$installExit"
+          Write-Host '=== APPX PACKAGES ==='
+          Get-AppxPackage | Where-Object {$_.Name -match 'Firecast|RRPG' -or $_.PackageFullName -match 'Firecast|RRPG'} | Format-List Name,PackageFullName,PackageFamilyName,InstallLocation,Version,Status
+          Write-Host '=== START APPS ==='
+          Get-StartApps | Where-Object {$_.Name -match 'Firecast|RRPG'} | Format-List *
+          Write-Host '=== EXECUTABLE DISCOVERY ==='
+          $roots=@($env:LOCALAPPDATA,$env:ProgramFiles,${env:ProgramFiles(x86)}) | Where-Object {$_ -and (Test-Path $_)}
+          $found=@()
+          foreach($root in $roots){
+            Get-ChildItem $root -Filter '*.exe' -File -Recurse -ErrorAction SilentlyContinue |
+              Where-Object {$_.Name -match 'Firecast|RRPGFichas|RRPG'} |
+              ForEach-Object {
+                $vi=$_.VersionInfo
+                Write-Host ("EXE="+$_.FullName+" VERSION="+$vi.FileVersion+" PRODUCT="+$vi.ProductName)
+                $found += $_.FullName
+              }
+          }
+          Write-Host '=== RPK ASSOCIATION ==='
+          cmd /c 'reg query HKCU\Software\Classes\.rpk /s' 2>&1 | Write-Host
+          cmd /c 'reg query HKCR\.rpk /s' 2>&1 | Write-Host
+          if($showExit -ne 0 -and $installExit -ne 0){ throw 'STORE_PACKAGE_UNAVAILABLE' }
+          if($found.Count -eq 0 -and -not (Get-AppxPackage | Where-Object {$_.Name -match 'Firecast|RRPG'})){ throw 'FIRECAST_INSTALL_NOT_EVIDENCED' }
+          Write-Host 'FIRECAST_STORE_INSTALL_EVIDENCE=PASS'
