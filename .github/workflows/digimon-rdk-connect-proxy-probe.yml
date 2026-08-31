@@ -1,0 +1,50 @@
+name: DIGIMON RDK CONNECT Proxy Probe
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+    paths: [.github/workflows/digimon-rdk-connect-proxy-probe.yml]
+  workflow_dispatch:
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Build proxy pool
+        shell: bash
+        run: |
+          set -euxo pipefail
+          : > proxies.txt
+          curl -fsSL --max-time 30 https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt >> proxies.txt || true
+          curl -fsSL --max-time 30 https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt >> proxies.txt || true
+          sed -E 's#^https?://##; s#/.*$##' proxies.txt | grep -E '^[A-Za-z0-9.-]+:[0-9]+$' | awk '!seen[$0]++' | head -n 120 > proxies.clean
+          echo "PROXY_POOL_COUNT=$(wc -l < proxies.clean)"
+          test -s proxies.clean
+      - name: Find TLS CONNECT egress that reaches official RDK
+        shell: bash
+        run: |
+          set -uo pipefail
+          url='https://firecast.app/downloads/RDK3.7.b.exe'
+          rm -rf hits && mkdir hits
+          export url
+          cat proxies.clean | xargs -P 24 -I{} bash -c '
+            proxy="$1"; key=$(echo "$proxy"|tr ":." "___"); out="hits/$key.bin"; meta="hits/$key.meta"
+            code=$(curl -x "http://$proxy" --proxy-connect-timeout 4 --connect-timeout 5 --max-time 18 -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152 Safari/537.36" -sS -w "%{http_code}" -o "$out" "$url" 2>/dev/null || true)
+            size=$(stat -c%s "$out" 2>/dev/null || echo 0); headhex=$(xxd -p -l 2 "$out" 2>/dev/null || true)
+            if [ "$code" = 200 ] && [ "$headhex" = 4d5a ] && [ "$size" -gt 100000 ]; then
+              sha=$(sha256sum "$out"|awk "{print \$1}"); echo "$proxy|$code|$size|$sha" > "$meta"
+            else rm -f "$out" "$meta"; fi
+          ' _ {}
+          ls -l hits || true
+          metas=(hits/*.meta)
+          if [ ! -e "${metas[0]}" ]; then echo 'NO_VALID_CONNECT_PROXY'; exit 1; fi
+          cat hits/*.meta
+          first=$(head -n1 hits/*.meta | head -n1)
+          proxy=${first%%|*}; key=$(echo "$proxy"|tr ':.' '___')
+          cp "hits/$key.bin" rdk.exe
+          echo "VALID_CONNECT_PROXY_META=$first"
+          sha256sum rdk.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rdk-connect-proxy
+          path: rdk.exe
+          retention-days: 1
