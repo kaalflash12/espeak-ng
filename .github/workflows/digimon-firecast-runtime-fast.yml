@@ -1,0 +1,44 @@
+name: DIGIMON Firecast Runtime Fast Discovery
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+  workflow_dispatch:
+
+jobs:
+  discover:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install and discover Firecast
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+          Write-Host "INSTALL_EXIT=$LASTEXITCODE"
+          Write-Host '=== REGISTRY ==='
+          foreach($root in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')){
+            Get-ItemProperty $root -ErrorAction SilentlyContinue | Where-Object {$_.DisplayName -match 'Firecast|RRPG'} | ForEach-Object {
+              Write-Host "DISPLAY_NAME=$($_.DisplayName)"
+              Write-Host "DISPLAY_VERSION=$($_.DisplayVersion)"
+              Write-Host "INSTALL_LOCATION=$($_.InstallLocation)"
+              Write-Host "DISPLAY_ICON=$($_.DisplayIcon)"
+              Write-Host "UNINSTALL=$($_.UninstallString)"
+            }
+          }
+          Write-Host '=== COMMON PATHS ==='
+          $c=@(
+            "$env:LOCALAPPDATA\Firecast\Firecast.exe",
+            "$env:LOCALAPPDATA\Programs\Firecast\Firecast.exe",
+            "$env:LOCALAPPDATA\RRPGFirecast\Firecast.exe",
+            "$env:ProgramFiles\Firecast\Firecast.exe",
+            "${env:ProgramFiles(x86)}\Firecast\Firecast.exe"
+          )
+          foreach($p in $c){if($p){Write-Host "CHECK=$p EXISTS=$(Test-Path -LiteralPath $p)"}}
+          Write-Host '=== LOCALAPPDATA FIRECAST.EXE ==='
+          cmd /c "where /R \"$env:LOCALAPPDATA\" Firecast.exe 2>nul"
+          Write-Host '=== APPDATA FIRECAST.EXE ==='
+          cmd /c "where /R \"$env:APPDATA\" Firecast.exe 2>nul"
+          Write-Host '=== FIRECAST DIRS TOP2 ==='
+          Get-ChildItem $env:LOCALAPPDATA -Directory -ErrorAction SilentlyContinue | Where-Object {$_.Name -match 'Firecast|RRPG'} | ForEach-Object {Write-Host "DIR=$($_.FullName)"; Get-ChildItem $_.FullName -Force -ErrorAction SilentlyContinue | Select-Object Name,FullName,Length | Format-Table -AutoSize}
+          Write-Host '=== END ==='
+          exit 0
