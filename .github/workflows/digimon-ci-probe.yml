@@ -1,0 +1,18 @@
+name: DIGIMON CI Probe
+
+on:
+  push:
+    branches:
+      - digimon-ci-temp-20260830
+    paths:
+      - .github/workflows/digimon-ci-probe.yml
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - name: Confirm Windows runner
+        shell: pwsh
+        run: |
+          Write-Host "DIGIMON_PUBLIC_WINDOWS_RUNNER=PASS"
+          [Environment]::OSVersion.VersionString
