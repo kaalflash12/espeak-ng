@@ -11,7 +11,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - name: Install Firecast and exact final RPK
+      - name: Initialize Firecast and require exact DigiTerion RPK install
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -34,61 +34,70 @@ jobs:
 
           Add-Type -AssemblyName UIAutomationClient
           Add-Type -AssemblyName UIAutomationTypes
-          function Dump-UI([string]$tag){
-            Write-Host "=== UI $tag ==="
-            $root=[Windows.Automation.AutomationElement]::RootElement
-            $wins=$root.FindAll([Windows.Automation.TreeScope]::Children,[Windows.Automation.Condition]::TrueCondition)
-            foreach($w in $wins){
-              try {
-                $wn=[string]$w.Current.Name; $cls=[string]$w.Current.ClassName
-                if($wn -ne ''){Write-Host "WINDOW=$wn CLASS=$cls"}
-                if($wn -match 'Firecast|Plugin|Instal|Install|DIGIMON|RRPG'){
-                  $all=$w.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
-                  foreach($e in $all){
-                    try { $n=[string]$e.Current.Name; $ct=[string]$e.Current.ControlType.ProgrammaticName; if($n-ne''){Write-Host "CONTROL=$ct NAME=$n"} } catch {}
-                  }
-                }
-              } catch {}
-            }
+          function Close-FirecastGracefully($p){
+            if($null-eq$p -or $p.HasExited){return}
+            try{$p.CloseMainWindow()|Out-Null}catch{}
+            try{Wait-Process -Id $p.Id -Timeout 8 -ErrorAction Stop}catch{Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}
           }
-          function Invoke-InstallConfirm {
+          function Invoke-ConfirmButtons {
             $root=[Windows.Automation.AutomationElement]::RootElement
             $all=$root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
             foreach($e in $all){
-              try {
-                $n=[string]$e.Current.Name
-                $ct=[string]$e.Current.ControlType.ProgrammaticName
-                if($ct -eq 'ControlType.Button' -and $n -match '^(Instalar|Install|Sim|Yes|OK|Confirmar|Confirm)$'){
+              try{
+                $n=[string]$e.Current.Name; $ct=[string]$e.Current.ControlType.ProgrammaticName
+                if($ct-eq'ControlType.Button' -and $n-match '^(Instalar|Install|Sim|Yes|OK|Confirmar|Confirm|Continuar|Continue)$'){
                   $pat=$e.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
-                  if($pat){Write-Host "INVOKE_BUTTON=$n"; $pat.Invoke(); return $true}
+                  if($pat){Write-Host "INVOKE_BUTTON=$n"; $pat.Invoke()}
                 }
-              } catch {}
+              }catch{}
             }
-            return $false
+          }
+          function List-PluginIds([string]$tag){
+            $plugins=Join-Path $env:APPDATA 'Firecast\Plugins'
+            Write-Host "=== PLUGIN IDS $tag ==="
+            if(-not(Test-Path $plugins)){Write-Host 'PLUGIN_DIR_MISSING'; return @()}
+            $py=Join-Path $env:RUNNER_TEMP 'list-plugin-ids.py'
+            @'
+import os,sys,zipfile,re,json
+root=sys.argv[1]
+ids=[]
+for name in sorted(os.listdir(root)):
+    if not name.lower().endswith('.rpk'): continue
+    p=os.path.join(root,name)
+    try:
+        with zipfile.ZipFile(p) as z:
+            raw=z.read('module.xml').decode('utf-8','replace')
+        m=re.search(r'<id>\s*([^<]+?)\s*</id>',raw,re.I)
+        mid=m.group(1).strip() if m else ''
+        print('PLUGIN_FILE='+p+' MODULE_ID='+mid+' SIZE='+str(os.path.getsize(p)))
+        if mid: ids.append(mid)
+    except Exception as e:
+        print('PLUGIN_READ_FAIL='+p+' ERROR='+repr(e))
+print('PLUGIN_IDS_JSON='+json.dumps(ids))
+'@ | Set-Content $py -Encoding UTF8
+            $lines=& python $py $plugins
+            $lines|ForEach-Object{Write-Host $_}
+            $jsonLine=$lines|Where-Object{$_ -like 'PLUGIN_IDS_JSON=*'}|Select-Object -Last 1
+            if(-not $jsonLine){return @()}
+            return @((($jsonLine -replace '^PLUGIN_IDS_JSON=','')|ConvertFrom-Json))
           }
 
-          $before=Get-Date
+          # First startup creates the normal Firecast profile/default plugins.
+          $p=Start-Process -FilePath $firecast -PassThru
+          Start-Sleep 10
+          Invoke-ConfirmButtons
+          Start-Sleep 2
+          Close-FirecastGracefully $p
+          $beforeIds=@(List-PluginIds 'BEFORE')
+          if($beforeIds -contains 'DigiTerionMon.EraDaDualidade'){throw 'DigiTerion unexpectedly present before install'}
+
+          # Second startup uses the exact registered .rpk command semantics.
           $p=Start-Process -FilePath $firecast -ArgumentList ('"'+$rpk+'"') -PassThru
-          Write-Host "FIRECAST_PID=$($p.Id)"
-          for($i=0;$i-lt18;$i++){
-            Start-Sleep 2
-            Dump-UI "T$i"
-            [void](Invoke-InstallConfirm)
-          }
-
-          Write-Host '=== RECENT FILES ==='
-          $roots=@((Join-Path $env:LOCALAPPDATA 'Firecast'),(Join-Path $env:APPDATA 'Firecast'),$env:APPDATA,$env:LOCALAPPDATA) | Where-Object {$_ -and (Test-Path $_)} | Select-Object -Unique
-          $hits=@()
-          foreach($root in $roots){
-            Get-ChildItem $root -Recurse -File -ErrorAction SilentlyContinue |
-              Where-Object {$_.LastWriteTime -ge $before.AddMinutes(-1) -and ($_.Name -match 'Digi|Terion|plugin|rpk|module|init' -or $_.DirectoryName -match 'Digi|Terion|Plugin|plugin')} |
-              ForEach-Object { Write-Host ("RECENT="+$_.FullName+" SIZE="+$_.Length); $hits += $_.FullName }
-          }
-          Write-Host "RECENT_HIT_COUNT=$($hits.Count)"
-
-          Write-Host '=== FIRECAST TREE DIRS ==='
-          Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Firecast') -Directory -Recurse -ErrorAction SilentlyContinue | ForEach-Object {Write-Host ("DIR="+$_.FullName)}
-
-          if(-not $p.HasExited){$p.CloseMainWindow()|Out-Null; Start-Sleep 3; if(-not $p.HasExited){Stop-Process -Id $p.Id -Force}}
-          if($hits.Count-eq0){throw 'RPK_INSTALL_NOT_MATERIALIZED'}
-          Write-Host 'DIRECT_RPK_INSTALL_PROBE=PASS'
+          Write-Host "RPK_INSTALL_PROCESS_PID=$($p.Id)"
+          for($i=0;$i-lt20;$i++){Start-Sleep 2; Invoke-ConfirmButtons}
+          $afterIds=@(List-PluginIds 'AFTER')
+          $installed=$afterIds -contains 'DigiTerionMon.EraDaDualidade'
+          Write-Host "DIGITERION_MODULE_PRESENT=$installed"
+          Close-FirecastGracefully $p
+          if(-not $installed){throw 'EXACT_DIGITERION_RPK_NOT_INSTALLED'}
+          Write-Host 'DIRECT_EXACT_RPK_INSTALL=PASS'
