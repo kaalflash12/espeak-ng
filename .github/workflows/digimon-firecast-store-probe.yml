@@ -15,14 +15,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Continue'
-          function Invoke-WingetBounded([string[]]$Args,[int]$TimeoutSec,[string]$Tag){
+          function Invoke-WingetBounded([string[]]$WingetArgs,[int]$TimeoutSec,[string]$Tag){
             $out=Join-Path $env:RUNNER_TEMP ($Tag+'.out.txt')
             $err=Join-Path $env:RUNNER_TEMP ($Tag+'.err.txt')
             Remove-Item $out,$err -Force -ErrorAction SilentlyContinue
-            $p=Start-Process -FilePath 'winget.exe' -ArgumentList $Args -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+            Write-Host ("COMMAND=winget " + ($WingetArgs -join ' '))
+            $p=Start-Process -FilePath 'winget.exe' -ArgumentList $WingetArgs -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
             try {
               Wait-Process -Id $p.Id -Timeout $TimeoutSec -ErrorAction Stop
-              $p.Refresh(); $code=$p.ExitCode
+              $p.Refresh(); $code=[int]$p.ExitCode
             } catch {
               Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
               $code=124
@@ -32,36 +33,36 @@ jobs:
             Write-Host "=== $Tag STDERR ==="
             if(Test-Path $err){Get-Content $err}
             Write-Host "$($Tag.ToUpperInvariant())_EXIT=$code"
-            return $code
+            return [int]$code
           }
 
           Write-Host '=== WINGET VERSION/SOURCES ==='
           winget --version
           winget source list
 
-          $showArgs=@('show','--id','XP9B1DQSFR12KZ','--source','msstore','--accept-source-agreements','--disable-interactivity')
-          $showExit=Invoke-WingetBounded $showArgs 60 'store_show'
+          $showParams=@('show','--id','XP9B1DQSFR12KZ','--source','msstore','--accept-source-agreements','--disable-interactivity')
+          [int]$showExit=Invoke-WingetBounded -WingetArgs $showParams -TimeoutSec 60 -Tag 'store_show'
 
-          $installArgs=@('install','--id','XP9B1DQSFR12KZ','--source','msstore','--accept-source-agreements','--accept-package-agreements','--silent','--disable-interactivity')
-          $installExit=Invoke-WingetBounded $installArgs 150 'store_install'
+          $installParams=@('install','--id','XP9B1DQSFR12KZ','--source','msstore','--accept-source-agreements','--accept-package-agreements','--silent','--disable-interactivity')
+          [int]$installExit=Invoke-WingetBounded -WingetArgs $installParams -TimeoutSec 150 -Tag 'store_install'
 
           Write-Host '=== WINGET LIST EXACT ID ==='
           winget list --id XP9B1DQSFR12KZ --accept-source-agreements --disable-interactivity
-          $listExit=$LASTEXITCODE
+          [int]$listExit=$LASTEXITCODE
           Write-Host "STORE_LIST_EXIT=$listExit"
 
           Write-Host '=== APPX PACKAGES ==='
-          $appx=Get-AppxPackage | Where-Object {$_.Name -match 'Firecast|RRPG' -or $_.PackageFullName -match 'Firecast|RRPG'}
+          $appx=@(Get-AppxPackage | Where-Object {$_.Name -match 'Firecast|RRPG' -or $_.PackageFullName -match 'Firecast|RRPG'})
           $appx | Format-List Name,PackageFullName,PackageFamilyName,InstallLocation,Version,Status
 
           Write-Host '=== START APPS ==='
-          $start=Get-StartApps | Where-Object {$_.Name -match 'Firecast|RRPG'}
+          $start=@(Get-StartApps | Where-Object {$_.Name -match 'Firecast|RRPG'})
           $start | Format-List *
 
           Write-Host '=== UNINSTALL REGISTRY ==='
           $reg=@()
           foreach($rp in @('HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*','HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*')){
-            $reg += Get-ItemProperty $rp -ErrorAction SilentlyContinue | Where-Object {$_.DisplayName -match 'Firecast|RRPG'}
+            $reg += @(Get-ItemProperty $rp -ErrorAction SilentlyContinue | Where-Object {$_.DisplayName -match 'Firecast|RRPG'})
           }
           $reg | Format-List DisplayName,DisplayVersion,InstallLocation,UninstallString,Publisher
 
