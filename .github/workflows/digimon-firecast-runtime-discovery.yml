@@ -1,0 +1,41 @@
+name: DIGIMON Firecast Runtime Discovery
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+  workflow_dispatch:
+
+jobs:
+  discover:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Firecast runtime and discover paths
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+          Write-Host "INSTALL_EXIT=$LASTEXITCODE"
+          Write-Host '=== WINGET LIST ==='
+          winget list --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements
+          Write-Host '=== UNINSTALL REGISTRY ==='
+          $keys=@('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')
+          foreach($k in $keys){Get-ItemProperty $k -ErrorAction SilentlyContinue | Where-Object {$_.DisplayName -match 'Firecast|RRPG'} | Format-List DisplayName,DisplayVersion,InstallLocation,DisplayIcon,UninstallString,QuietUninstallString}
+          Write-Host '=== EXE SEARCH ==='
+          $roots=@($env:LOCALAPPDATA,$env:APPDATA,$env:ProgramFiles,${env:ProgramFiles(x86)},'C:\ProgramData') | Where-Object {$_ -and (Test-Path $_)} | Select-Object -Unique
+          $found=@()
+          foreach($r in $roots){
+            Write-Host "SEARCH_ROOT=$r"
+            $found += Get-ChildItem -LiteralPath $r -Filter '*.exe' -File -Recurse -ErrorAction SilentlyContinue | Where-Object {$_.Name -match 'Firecast|RRPG'} | Select-Object FullName,Length,LastWriteTime
+          }
+          $found | Sort-Object FullName -Unique | Format-Table -AutoSize
+          Write-Host '=== FIRECAST/RRPG DIRECTORIES ==='
+          foreach($r in @($env:LOCALAPPDATA,$env:APPDATA,'C:\ProgramData')){
+            if(Test-Path $r){Get-ChildItem -LiteralPath $r -Directory -Recurse -ErrorAction SilentlyContinue | Where-Object {$_.Name -match 'Firecast|RRPG'} | Select-Object -First 100 FullName | Format-Table -AutoSize}
+          }
+          Write-Host '=== RECENT FILES AFTER INSTALL ==='
+          $cut=(Get-Date).AddMinutes(-10)
+          foreach($r in @($env:LOCALAPPDATA,$env:APPDATA,'C:\ProgramData')){
+            if(Test-Path $r){Get-ChildItem -LiteralPath $r -File -Recurse -ErrorAction SilentlyContinue | Where-Object {$_.LastWriteTime -gt $cut -and ($_.FullName -match 'Firecast|RRPG|plugin|rpk')} | Select-Object -First 200 FullName,Length,LastWriteTime | Format-Table -AutoSize}
+          }
+          exit 0
