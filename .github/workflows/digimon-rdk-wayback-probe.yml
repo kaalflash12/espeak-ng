@@ -1,0 +1,52 @@
+name: DIGIMON RDK Wayback Probe
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Query and verify archived official RDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $cdx='https://web.archive.org/cdx/search/cdx?url=firecast.app%2Fdownloads%2FRDK3.7.b.exe&output=json&filter=statuscode%3A200&fl=timestamp,original,statuscode,mimetype,digest,length&limit=20&from=2024'
+          Write-Host '=== CDX QUERY ==='
+          $raw=& curl.exe -L --fail --silent --show-error --max-time 60 $cdx
+          if($LASTEXITCODE -ne 0){ throw 'CDX_QUERY_FAILED' }
+          Write-Host $raw
+          $rows=$raw | ConvertFrom-Json
+          if(-not $rows -or $rows.Count -lt 2){ throw 'NO_ARCHIVED_RDK' }
+          $header=$rows[0]
+          $captures=@($rows | Select-Object -Skip 1)
+          Write-Host "CAPTURE_COUNT=$($captures.Count)"
+          $ok=@()
+          foreach($c in $captures){
+            $ts=[string]$c[0]
+            $orig=[string]$c[1]
+            $digest=[string]$c[4]
+            $len=[string]$c[5]
+            $u="https://web.archive.org/web/${ts}id_/$orig"
+            $p=Join-Path $env:RUNNER_TEMP ("rdk-$ts.exe")
+            Write-Host "TRY_CAPTURE=$ts DIGEST=$digest LENGTH=$len"
+            & curl.exe -L --fail --silent --show-error --max-time 90 -o $p $u
+            if($LASTEXITCODE -ne 0 -or !(Test-Path $p)){ Write-Host "CAPTURE_FETCH_FAIL=$ts"; continue }
+            $fi=Get-Item $p
+            $b=[IO.File]::ReadAllBytes($p)
+            $mz=if($b.Length-ge 2){[Text.Encoding]::ASCII.GetString($b,0,2)}else{''}
+            $sha=(Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Host "CAPTURE_FETCH_OK=$ts SIZE=$($fi.Length) MZ=$mz SHA256=$sha"
+            if($mz-ne'MZ' -or $fi.Length-lt 100000){continue}
+            $vi=[Diagnostics.FileVersionInfo]::GetVersionInfo($p)
+            $sig=Get-AuthenticodeSignature $p
+            Write-Host "VERSION=$($vi.FileVersion) PRODUCT=$($vi.ProductName) PRODUCT_VERSION=$($vi.ProductVersion) COMPANY=$($vi.CompanyName) SIGNATURE=$($sig.Status) SIGNER=$($sig.SignerCertificate.Subject)"
+            $ok += [pscustomobject]@{Path=$p;Ts=$ts;Sha=$sha;Size=$fi.Length;Version=$vi.FileVersion;Product=$vi.ProductName;Sig=$sig.Status;Digest=$digest}
+          }
+          if($ok.Count -eq 0){ throw 'NO_VALID_ARCHIVED_PE' }
+          $groups=$ok|Group-Object Sha|Sort-Object Count -Descending
+          foreach($g in $groups){Write-Host "SHA_GROUP=$($g.Name) COUNT=$($g.Count) CAPTURES=$(($g.Group.Ts -join ','))"}
+          $best=$groups|Select-Object -First 1
+          $candidate=$best.Group|Select-Object -First 1
+          Write-Host "RDK_ARCHIVE_VERIFIED_SHA=$($candidate.Sha) SIZE=$($candidate.Size) VERSION=$($candidate.Version) PRODUCT=$($candidate.Product) SIG=$($candidate.Sig) CAPTURE=$($candidate.Ts) IA_DIGEST=$($candidate.Digest)"
