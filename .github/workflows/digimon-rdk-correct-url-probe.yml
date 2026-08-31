@@ -1,0 +1,38 @@
+name: DIGIMON RDK Correct URL Probe
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe canonical and legacy RDK URLs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          $targets=@(
+            'https://firecast.app/downloads/RDK3.7b.exe',
+            'http://www.firecast.com.br/RDK3.7b.exe',
+            'https://www.firecast.com.br/RDK3.7b.exe',
+            'http://www.rrpg.com.br/RDK3.7b.exe',
+            'https://www.rrpg.com.br/RDK3.7b.exe',
+            'http://www.firecast.com.br/RDK3.4b.exe'
+          )
+          $i=0; $valid=@()
+          foreach($u in $targets){
+            $i++; $p=Join-Path $env:RUNNER_TEMP ("probe-$i.exe")
+            Write-Host "=== $u ==="
+            & curl.exe -L --fail --silent --show-error --max-time 60 -A 'Mozilla/5.0' -o $p $u
+            if($LASTEXITCODE-ne0 -or !(Test-Path $p)){Write-Host 'FETCH_FAIL'; continue}
+            $b=[IO.File]::ReadAllBytes($p); $mz=if($b.Length-ge2){[Text.Encoding]::ASCII.GetString($b,0,2)}else{''}
+            $sha=(Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant(); $len=(Get-Item $p).Length
+            Write-Host "FETCH_OK SIZE=$len MZ=$mz SHA256=$sha"
+            if($mz-ne'MZ' -or $len-lt100000){continue}
+            $vi=[Diagnostics.FileVersionInfo]::GetVersionInfo($p); $sig=Get-AuthenticodeSignature $p
+            Write-Host "VERSION=$($vi.FileVersion) PRODUCT=$($vi.ProductName) PRODUCT_VERSION=$($vi.ProductVersion) COMPANY=$($vi.CompanyName) SIGNATURE=$($sig.Status) SIGNER=$($sig.SignerCertificate.Subject)"
+            $valid += [pscustomobject]@{Url=$u;Path=$p;Sha=$sha;Version=$vi.FileVersion;Product=$vi.ProductName;Size=$len}
+          }
+          if($valid.Count-eq0){throw 'NO_VALID_RDK_URL'}
+          foreach($v in $valid){Write-Host "VALID_RDK_URL=$($v.Url) SHA=$($v.Sha) SIZE=$($v.Size) VERSION=$($v.Version) PRODUCT=$($v.Product)"}
