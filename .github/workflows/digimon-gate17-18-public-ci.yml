@@ -41,15 +41,88 @@ jobs:
           Write-Host "FINAL_RPK_SHA256=$rpkSha"
           Write-Host "GATE17_SCRIPT_SHA256=$scriptSha"
 
-          # Fix only the harness record key: mutate the canonical seeded Fragmento record,
-          # not the duplicate item document that would create a 19th fragment state row.
+          # Harness-only correction: use the already-seeded Fragmento state record.
           $raw=Get-Content $script -Raw
           $old='local FRAG="06_ITENS/Fragmento/Fragmento_de_Agumon.md"'
           $new='local FRAG="06_ITENS/FRAGMENTOS_DETALHADOS/Fragmento_de_Agumon.md"'
           if(-not $raw.Contains($old)){throw 'Expected fragment harness line not found'}
           $raw=$raw.Replace($old,$new)
+
+          # Installer transport correction: binaries are pre-downloaded by a real browser below.
+          $oldFc="Invoke-WebRequest -UseBasicParsing 'https://firecast.app/downloads/firecast8_13_win64.exe' -OutFile `$fc"
+          $newFc="if(-not(Test-Path `$fc)){throw 'Pre-downloaded Firecast installer missing'}"
+          $oldRdk="Invoke-WebRequest -UseBasicParsing 'https://firecast.app/downloads/RDK3.7.b.exe' -OutFile `$ri"
+          $newRdk="if(-not(Test-Path `$ri)){throw 'Pre-downloaded RDK installer missing'}"
+          if(-not $raw.Contains($oldFc)){throw 'Expected Firecast download line not found'}
+          if(-not $raw.Contains($oldRdk)){throw 'Expected RDK download line not found'}
+          $raw=$raw.Replace($oldFc,$newFc).Replace($oldRdk,$newRdk)
           Set-Content $script -Value $raw -Encoding UTF8
           Write-Host 'GATE17_FRAGMENT_RECORD_KEY_FIX=APPLIED'
+          Write-Host 'INSTALLER_BROWSER_TRANSPORT_FIX=APPLIED'
+
+      - name: Download Firecast and RDK through real Chrome
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'firecast-browser-download'
+          New-Item -ItemType Directory -Force $work|Out-Null
+          Push-Location $work
+          try {
+            npm init -y | Out-Null
+            npm install --silent playwright-core@1.55.0
+            @'
+          const { chromium } = require('playwright-core');
+          const fs = require('fs');
+          const path = require('path');
+          (async()=>{
+            const chrome = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+            if (!fs.existsSync(chrome)) throw new Error('Chrome executable not found');
+            const browser = await chromium.launch({
+              headless: true,
+              executablePath: chrome,
+              args: ['--disable-blink-features=AutomationControlled','--no-sandbox','--disable-dev-shm-usage']
+            });
+            const context = await browser.newContext({
+              acceptDownloads: true,
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36'
+            });
+            async function download(pageUrl, hrefPart, directUrl, destination) {
+              const page = await context.newPage();
+              page.setDefaultTimeout(180000);
+              await page.goto(pageUrl, {waitUntil:'domcontentloaded', timeout:180000});
+              await page.waitForTimeout(8000);
+              let link = page.locator(`a[href*="${hrefPart}"]`).first();
+              if (await link.count()) {
+                const [dl] = await Promise.all([
+                  page.waitForEvent('download', {timeout:180000}),
+                  link.click({timeout:180000})
+                ]);
+                await dl.saveAs(destination);
+              } else {
+                const dlPromise = page.waitForEvent('download', {timeout:180000});
+                await page.goto(directUrl, {waitUntil:'commit', timeout:180000}).catch(()=>{});
+                const dl = await dlPromise;
+                await dl.saveAs(destination);
+              }
+              await page.close();
+              if (!fs.existsSync(destination)) throw new Error(`Download missing: ${destination}`);
+              const fd=fs.openSync(destination,'r'); const b=Buffer.alloc(2); fs.readSync(fd,b,0,2,0); fs.closeSync(fd);
+              if (b.toString('ascii') !== 'MZ') throw new Error(`Not a PE executable: ${destination}`);
+              console.log(`BROWSER_DOWNLOAD_PASS=${path.basename(destination)} SIZE=${fs.statSync(destination).size}`);
+            }
+            await download('https://firecast.app/pt_br/download/','firecast8_13_win64.exe','https://firecast.app/downloads/firecast8_13_win64.exe',process.env.RUNNER_TEMP+'\\firecast.exe');
+            await download('https://firecast.app/pt_br/para-programadores/','RDK3.7b.exe','https://firecast.app/downloads/RDK3.7b.exe',process.env.RUNNER_TEMP+'\\rdk-installer.exe');
+            await browser.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          '@ | Set-Content .\download-firecast.js -Encoding UTF8
+            node .\download-firecast.js
+          } finally { Pop-Location }
+          $fc=Join-Path $env:RUNNER_TEMP 'firecast.exe'
+          $rdk=Join-Path $env:RUNNER_TEMP 'rdk-installer.exe'
+          if((Get-Content $fc -AsByteStream -TotalCount 2 | ForEach-Object {[char]$_}) -join '' -ne 'MZ'){throw 'Firecast installer PE validation failed'}
+          if((Get-Content $rdk -AsByteStream -TotalCount 2 | ForEach-Object {[char]$_}) -join '' -ne 'MZ'){throw 'RDK installer PE validation failed'}
+          Write-Host ('FIRECAST_INSTALLER_SHA256='+(Get-FileHash $fc -Algorithm SHA256).Hash.ToLowerInvariant())
+          Write-Host ('RDK_INSTALLER_SHA256='+(Get-FileHash $rdk -Algorithm SHA256).Hash.ToLowerInvariant())
 
       - name: Execute Gate 17 persistence and Gate 18 final runtime
         shell: pwsh
