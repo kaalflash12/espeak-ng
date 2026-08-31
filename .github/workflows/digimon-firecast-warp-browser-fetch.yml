@@ -47,9 +47,8 @@ jobs:
       - name: Solve Cloudflare in real Chrome and fetch installers
         shell: bash
         run: |
-          cat > /tmp/firecast-browser.js <<'NODE'
+          cat > firecast-browser.js <<'NODE'
           const fs = require('fs');
-          const path = require('path');
           const { chromium } = require('playwright-core');
           const chrome = fs.existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' : '/usr/bin/google-chrome-stable';
           const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
@@ -106,10 +105,9 @@ jobs:
             async function fetchTarget(name, urls) {
               for (const url of urls) {
                 console.log('TRY_DOWNLOAD', name, url);
-                let download = null;
-                const dp = page.waitForEvent('download', { timeout: 90000 }).then(d => { download=d; return d; }).catch(()=>null);
+                const dp = page.waitForEvent('download', { timeout: 90000 }).catch(()=>null);
                 await page.goto(url, { waitUntil:'domcontentloaded', timeout:90000 }).catch(e => console.log('DL_GOTO', e.message));
-                download = await dp;
+                const download = await dp;
                 if (download) {
                   await download.saveAs(name);
                   const size = fs.statSync(name).size;
@@ -118,12 +116,14 @@ jobs:
                   if (head === 'MZ' && size > 100000) return true;
                   fs.unlinkSync(name);
                 }
-                const title = await page.title().catch(()=> '');
-                const text = (await page.locator('body').innerText({timeout:3000}).catch(()=>'' )).replace(/\s+/g,' ').slice(0,500);
+                let title = await page.title().catch(()=> '');
+                let text = (await page.locator('body').innerText({timeout:3000}).catch(()=>'' )).replace(/\s+/g,' ').slice(0,500);
                 console.log('DOWNLOAD_PAGE_STATE', title, page.url(), text);
                 const cookies = await context.cookies('https://firecast.app');
                 console.log('DOWNLOAD_COOKIES', cookies.map(c=>c.name).join(','));
                 for (let i=0;i<12;i++) {
+                  title = await page.title().catch(()=> '');
+                  text = (await page.locator('body').innerText({timeout:3000}).catch(()=>'' )).replace(/\s+/g,' ').slice(0,500);
                   if (!/just a moment|verifying|checking your browser|performing security verification/i.test(title+' '+text)) break;
                   await page.waitForTimeout(5000);
                 }
@@ -137,7 +137,7 @@ jobs:
             await browser.close();
           })().catch(e => { console.error('FATAL', e.stack || e); process.exit(1); });
           NODE
-          xvfb-run -a node /tmp/firecast-browser.js
+          xvfb-run -a node ./firecast-browser.js
           for f in rdk.exe firecast.exe; do
             test "$(xxd -p -l 2 "$f")" = 4d5a
             test "$(stat -c%s "$f")" -gt 100000
