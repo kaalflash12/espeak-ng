@@ -24,12 +24,13 @@ jobs:
         shell: bash
         run: |
           cat > /tmp/fetch.py <<'PY'
-          import os,time,hashlib,sys
+          import os,time,hashlib,sys,json
           from pathlib import Path
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
           from selenium.webdriver.common.by import By
           out=Path(os.environ['RUNNER_TEMP'])/'firecast-browser-out'; out.mkdir(parents=True,exist_ok=True)
+          diag=Path(os.environ['RUNNER_TEMP'])/'firecast-browser-diag'; diag.mkdir(parents=True,exist_ok=True)
           opt=Options()
           opt.add_argument('--no-sandbox'); opt.add_argument('--disable-dev-shm-usage')
           opt.add_argument('--window-size=1365,900')
@@ -39,20 +40,38 @@ jobs:
           opt.add_experimental_option('prefs',{'download.default_directory':str(out),'download.prompt_for_download':False,'download.directory_upgrade':True,'safebrowsing.enabled':True})
           d=webdriver.Chrome(options=opt)
           d.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument',{'source':"Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"})
+          def capture(tag):
+              try:d.save_screenshot(str(diag/f'{tag}.png'))
+              except Exception as e:print('SCREENSHOT_ERR',e)
+              try:(diag/f'{tag}.html').write_text(d.page_source or '',encoding='utf-8')
+              except Exception as e:print('HTML_ERR',e)
+              try:
+                  frames=d.find_elements(By.TAG_NAME,'iframe')
+                  data=[]
+                  for i,f in enumerate(frames):
+                      try:data.append({'i':i,'src':f.get_attribute('src'),'title':f.get_attribute('title'),'name':f.get_attribute('name'),'id':f.get_attribute('id'),'rect':f.rect})
+                      except Exception as e:data.append({'i':i,'error':str(e)})
+                  (diag/f'{tag}-frames.json').write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
+                  print('FRAMES',data,flush=True)
+              except Exception as e:print('FRAME_ENUM_ERR',e)
           def wait_clear(url,limit=90):
               d.get(url)
               for i in range(limit):
                   title=d.title or ''
                   src=d.page_source or ''
-                  if i%5==0: print('WAIT',i,'TITLE',repr(title),'URL',d.current_url,'LEN',len(src),flush=True)
+                  if i%10==0:
+                      print('WAIT',i,'TITLE',repr(title),'URL',d.current_url,'LEN',len(src),flush=True)
+                      capture(f'challenge-{i:02d}')
                   if 'Just a moment' not in title and 'cf-chl' not in src and d.current_url.startswith('https://firecast.app'):
                       return True
                   time.sleep(1)
+              capture('challenge-final')
               return False
           try:
               if not wait_clear('https://firecast.app/pt_br/para-programadores/',90):
                   print('CF_NOT_CLEARED_HOME'); sys.exit(2)
               print('HOME_CLEARED',d.title,d.current_url,d.get_cookies(),flush=True)
+              capture('home-cleared')
               links=d.find_elements(By.TAG_NAME,'a')
               sdk=None
               for a in links:
@@ -73,7 +92,8 @@ jobs:
                   print('DOWNLOAD_WAIT',d.title,d.current_url,[p.name for p in out.iterdir()],flush=True)
                   time.sleep(2)
               if not found or found.stat().st_size<=100000:
-                  print('NO_VALID_DOWNLOAD',d.title,d.current_url,d.page_source[:1000]);sys.exit(4)
+                  capture('download-failed')
+                  print('NO_VALID_DOWNLOAD',d.title,d.current_url);sys.exit(4)
               b=found.read_bytes(); sha=hashlib.sha256(b).hexdigest()
               print('BROWSER_FETCH_FILE',found.name,'SIZE',len(b),'HEAD',b[:2],'SHA256',sha,flush=True)
               if b[:2]!=b'MZ':sys.exit(5)
@@ -84,7 +104,14 @@ jobs:
           PY
           xvfb-run -a python /tmp/fetch.py
       - uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: firecast-rdk-browser-verified
           path: ${{ runner.temp }}/firecast-browser-out/rdk-verified.exe
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: firecast-browser-challenge-diagnostic
+          path: ${{ runner.temp }}/firecast-browser-diag/*
+          if-no-files-found: warn
