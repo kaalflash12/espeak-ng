@@ -1,0 +1,26 @@
+name: DIGIMON Drive Bundle Probe
+on:
+  push:
+    branches: [digimon-fetch-matrix-20260830]
+    paths: [.github/workflows/digimon-drive-bundle-probe.yml]
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download and inspect current Drive object
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          py -m pip install --disable-pip-version-check --quiet gdown
+          $z=Join-Path $env:RUNNER_TEMP 'drive-current.zip'
+          py -m gdown 'https://drive.google.com/uc?id=1LWaYGuvoVLQ-TP3Yj0nqVprosbmYe_1b' -O $z
+          if($LASTEXITCODE-ne 0){throw 'GDOWN_FAIL'}
+          $sha=(Get-FileHash $z -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "DRIVE_SHA256=$sha SIZE=$((Get-Item $z).Length)"
+          $d=Join-Path $env:RUNNER_TEMP 'drive-current'; Expand-Archive $z $d -Force
+          $rpks=@(Get-ChildItem $d -Recurse -Filter '*.rpk' -File)
+          Write-Host "RPK_COUNT=$($rpks.Count)"
+          foreach($r in $rpks){$h=(Get-FileHash $r.FullName -Algorithm SHA256).Hash.ToLowerInvariant();Write-Host "RPK=$($r.FullName) SIZE=$($r.Length) SHA256=$h"}
+          Get-ChildItem $d -Recurse -File | Select-Object -First 80 FullName,Length | Format-Table -AutoSize
+          if($rpks.Count-lt 1){throw 'NO_RPK_IN_DRIVE_OBJECT'}
