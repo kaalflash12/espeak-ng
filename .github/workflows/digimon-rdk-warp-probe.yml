@@ -1,0 +1,67 @@
+name: DIGIMON RDK WARP Probe
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+    paths: [.github/workflows/digimon-rdk-warp-probe.yml]
+  workflow_dispatch:
+jobs:
+  fetch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Install Cloudflare WARP
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ noble main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update -qq
+          sudo apt-get install -y cloudflare-warp
+          sudo systemctl enable --now warp-svc
+          sleep 2
+          warp-cli --accept-tos registration new || warp-cli --accept-tos registration show
+          warp-cli --accept-tos mode warp
+          warp-cli --accept-tos connect
+          connected=0
+          for i in $(seq 1 45); do
+            s=$(warp-cli --accept-tos status || true)
+            echo "$s"
+            if echo "$s" | grep -qi 'Connected'; then connected=1; break; fi
+            sleep 1
+          done
+          test "$connected" = 1
+          echo 'WARP_CONNECTED'
+          curl -fsSL --max-time 30 https://www.cloudflare.com/cdn-cgi/trace | tee /tmp/warp-trace.txt
+      - name: Fetch official installers through WARP
+        shell: bash
+        run: |
+          set -uo pipefail
+          fetch_pe() {
+            local name="$1"; shift
+            local ok=0 n=0
+            for u in "$@"; do
+              n=$((n+1)); p="${name}-${n}.exe"; rm -f "$p"
+              echo "=== $name $u ==="
+              code=$(curl -L -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152 Safari/537.36' --connect-timeout 30 --max-time 150 -sS -w '%{http_code}' -o "$p" "$u" || true)
+              size=$(stat -c%s "$p" 2>/dev/null || echo 0)
+              headhex=$(xxd -p -l 2 "$p" 2>/dev/null || true)
+              sha=$(sha256sum "$p" 2>/dev/null | awk '{print $1}' || true)
+              echo "RESULT NAME=$name URL=$u HTTP=$code SIZE=$size HEADHEX=$headhex SHA256=$sha"
+              if [ "$code" = 200 ] && [ "$headhex" = 4d5a ] && [ "$size" -gt 100000 ]; then
+                cp "$p" "${name}.exe"
+                echo "VALID_${name^^}_URL=$u"
+                echo "VALID_${name^^}_SHA=$sha"
+                ok=1; break
+              fi
+            done
+            test "$ok" = 1
+          }
+          fetch_pe rdk 'https://firecast.app/downloads/RDK3.7.b.exe' 'https://firecast.app/downloads/RDK3.7b.exe'
+          fetch_pe firecast 'https://firecast.app/downloads/firecast8_13_win64.exe'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firecast-installers-warp
+          path: |
+            rdk.exe
+            firecast.exe
+          retention-days: 1
