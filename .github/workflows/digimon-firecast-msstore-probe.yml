@@ -1,0 +1,29 @@
+name: DIGIMON Firecast MS Store Probe
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show and install Firecast from Microsoft Store
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          Write-Host '=== WINGET SHOW ==='
+          winget show --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements
+          Write-Host "SHOW_EXIT=$LASTEXITCODE"
+          Write-Host '=== WINGET INSTALL ==='
+          winget install --id XP9B1DQSFR12KZ --source msstore --accept-source-agreements --accept-package-agreements --silent --disable-interactivity
+          Write-Host "INSTALL_EXIT=$LASTEXITCODE"
+          Write-Host '=== APPX PACKAGES ==='
+          Get-AppxPackage -AllUsers | Where-Object { $_.Name -match 'Firecast|RRPG' -or $_.PackageFullName -match 'Firecast|RRPG' } | Format-List Name,PackageFullName,InstallLocation,PackageFamilyName,Status
+          Write-Host '=== START APPS ==='
+          Get-StartApps | Where-Object { $_.Name -match 'Firecast|RRPG' } | Format-Table -AutoSize
+          Write-Host '=== FILE ASSOCIATIONS RPK ==='
+          cmd /c assoc .rpk
+          Write-Host '=== END ==='
