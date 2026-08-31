@@ -1,0 +1,44 @@
+name: DIGIMON Firecast Fetch Matrix
+on:
+  push:
+    branches: [digimon-fetch-matrix-20260830]
+jobs:
+  fetch:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Fetch official installers
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p out
+          ok=0
+          for spec in \
+            'rdk|https://firecast.app/downloads/RDK3.7b.exe' \
+            'rdkdot|https://firecast.app/downloads/RDK3.7.b.exe' \
+            'firecast|https://firecast.app/downloads/firecast8_13_win64.exe'; do
+            name=${spec%%|*}; u=${spec#*|}; p="out/${name}.exe"
+            rm -f "$p"
+            code=$(curl -L --connect-timeout 30 --max-time 120 -sS -A 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/152 Safari/537.36' -w '%{http_code}' -o "$p" "$u" || true)
+            size=$(wc -c < "$p" 2>/dev/null | tr -d ' ' || echo 0)
+            headhex=$(xxd -p -l 2 "$p" 2>/dev/null || true)
+            sha=$(shasum -a 256 "$p" 2>/dev/null | awk '{print $1}' || sha256sum "$p" 2>/dev/null | awk '{print $1}' || true)
+            echo "OS=${{ matrix.os }} NAME=$name HTTP=$code SIZE=$size HEADHEX=$headhex SHA256=$sha URL=$u"
+            if [ "$code" = 200 ] && [ "$headhex" = 4d5a ] && [ "$size" -gt 100000 ]; then
+              echo "VALID_PE_${name}=1"
+              ok=$((ok+1))
+            else
+              rm -f "$p"
+            fi
+          done
+          echo "VALID_COUNT=$ok"
+          test "$ok" -ge 1
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: firecast-fetch-${{ matrix.os }}
+          path: out/*.exe
+          if-no-files-found: error
