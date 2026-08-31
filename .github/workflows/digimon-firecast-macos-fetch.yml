@@ -1,0 +1,46 @@
+name: DIGIMON Firecast macOS Fetch
+on:
+  push:
+    branches: [digimon-ci-temp-20260830]
+    paths: [.github/workflows/digimon-firecast-macos-fetch.yml]
+  workflow_dispatch:
+jobs:
+  fetch:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Fetch and validate official Windows installers
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "EGRESS=$(curl -fsSL --max-time 20 https://api.ipify.org || true)"
+          fetch_pe() {
+            local name="$1"; shift
+            local ok=0 n=0
+            for u in "$@"; do
+              n=$((n+1)); p="${name}-${n}.exe"; rm -f "$p"
+              echo "=== $name $u ==="
+              code=$(curl -L --http1.1 -A 'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/537.36 Chrome/152 Safari/537.36' --connect-timeout 20 --max-time 120 -sS -w '%{http_code}' -o "$p" "$u" || true)
+              size=$(stat -f%z "$p" 2>/dev/null || echo 0)
+              headhex=$(xxd -p -l 2 "$p" 2>/dev/null || true)
+              sha=$(shasum -a 256 "$p" 2>/dev/null | awk '{print $1}' || true)
+              ctype=$(file -b "$p" 2>/dev/null || true)
+              echo "RESULT NAME=$name URL=$u HTTP=$code SIZE=$size HEADHEX=$headhex SHA256=$sha FILE=$ctype"
+              if [ "$code" = 200 ] && [ "$headhex" = 4d5a ] && [ "$size" -gt 100000 ]; then
+                cp "$p" "${name}.exe"
+                echo "VALID_${name^^}_URL=$u"
+                echo "VALID_${name^^}_SHA=$sha"
+                ok=1; break
+              fi
+            done
+            test "$ok" = 1
+          }
+          fetch_pe rdk 'https://firecast.app/downloads/RDK3.7.b.exe' 'https://firecast.app/downloads/RDK3.7b.exe'
+          fetch_pe firecast 'https://firecast.app/downloads/firecast8_13_win64.exe'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firecast-installers-macos
+          path: |
+            rdk.exe
+            firecast.exe
+          retention-days: 1
